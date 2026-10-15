@@ -5,18 +5,8 @@
  */
 
 import { computed, reactive, ref } from 'vue';
-import {
-  countEmbeddedImages,
-  createPresetSkin,
-  MAX_PRESETS,
-  parsePresetFile,
-  PresetParseError,
-  serializePresetFile,
-  suggestPresetFilename,
-  type Preset,
-  type PresetLayer,
-  type PresetSkin,
-} from '../core/model/preset';
+import { createPresetSkin, type PresetSkin } from '../core/model/preset';
+import type { RoomAvatarRecord, RoomDoc } from '../core/collab/types';
 import { scaleSizeBy, tidyAngle } from '../core/model/gesture';
 import { clampLayerToDocument } from '../core/model/transform';
 import { createId, MIN_LAYER_SIZE, type AvatarLayer, type BaseImageMeta } from '../core/model/types';
@@ -45,6 +35,8 @@ import { assertUsableSkin, describeCustomImage, describeSkin, type SkinOrigin, t
  * ------------------------------------------------------------------ */
 
 const baseImages = new Map<string, HTMLImageElement>();
+/** 底图原始文件：协同发布时上传服务器要用原件，转码反而损画质 */
+const baseFiles = new Map<string, File>();
 const skins = new Map<string, SkinTexture>();
 
 export function getBaseImage(id: string | null): HTMLImageElement | null {
@@ -88,7 +80,6 @@ interface EditorState {
   baseImageId: string | null;
   skins: SkinRecord[];
   activeSkinId: string | null;
-  presets: Preset[];
   layers: AvatarLayer[];
   selectedId: string | null;
   /** 画布视图：缩放倍率 + 平移（屏幕像素）。它只是"看得方便"，不属于文档内容，所以不进历史 */
@@ -110,7 +101,6 @@ const state = reactive<EditorState>({
   baseImageId: null,
   skins: [],
   activeSkinId: null,
-  presets: [],
   layers: [],
   selectedId: null,
   view: { zoom: 1, autoFit: true, x: 0, y: 0 },
@@ -128,6 +118,33 @@ const state = reactive<EditorState>({
 const past: Snapshot[] = [];
 const future: Snapshot[] = [];
 let openChange = false;
+
+/* ------------------------------------------------------------------ *
+ * 协同房间钩子
+ *
+ * collab 状态在另一个模块里，直接互相 import 会成环，所以这里只留挂钩：
+ * collab 启动时把三个实现注册进来，离线模式下一概不生效。
+ * ------------------------------------------------------------------ */
+
+export interface CollabHooks {
+  /** 布局变更守卫：返回 false 表示拒绝（编辑者模式下位置与数量冻结） */
+  canMutateLayout(action: string): boolean;
+  /** 皮肤被应用到既有图层后回调（编辑者模式用来记"哪些头像改过"） */
+  onSkinApplied(layerId: string): void;
+  /** 当前角色是否布局冻结（编辑者换肤时不自动改名等外观联动） */
+  isLayoutFrozen(): boolean;
+}
+
+let collabHooks: CollabHooks | null = null;
+
+export function setCollabHooks(hooks: CollabHooks | null): void {
+  collabHooks = hooks;
+}
+
+/** 布局变更统一闸口：没注册钩子（纯离线）时永远放行 */
+function ensureLayoutMutable(action: string): boolean {
+  return collabHooks ? collabHooks.canMutateLayout(action) : true;
+}
 
 /**
  * 快照数组本身不需要响应式（把 60 份快照都做成 Proxy 也没意义），
@@ -177,6 +194,7 @@ function sweepUnusedBaseImages(): void {
     if (!activeIds.has(id)) {
       baseImages.delete(id);
       baseMeta.delete(id);
+      baseFiles.delete(id);
     }
   }
 }
@@ -317,6 +335,7 @@ export function addLayer(skinId: string, overrides: Partial<AvatarLayer> = {}): 
 }
 
 export function removeLayer(id: string): void {
+  if (!ensureLayoutMutable('remove')) return;
   const index = state.layers.findIndex((l) => l.id === id);
   if (index < 0) return;
   beginChange();
@@ -326,6 +345,7 @@ export function removeLayer(id: string): void {
 }
 
 export function duplicateLayer(id: string): void {
+  if (!ensureLayoutMutable('duplicate')) return;
   const source = state.layers.find((l) => l.id === id);
   if (!source) return;
   beginChange();
@@ -351,6 +371,7 @@ export function duplicateLayer(id: string): void {
  * 拖动过程中用 record = false 就地重排、松手时再收一条历史，这样整次拖动只占一格撤销。
  */
 export function moveLayerTo(id: string, index: number, record = true): void {
+  if (!ensureLayoutMutable('reorder')) return;
   const from = state.layers.findIndex((l) => l.id === id);
   if (from < 0) return;
   const to = Math.max(0, Math.min(state.layers.length - 1, index));
@@ -368,6 +389,7 @@ export function nudgeLayerOrder(id: string, delta: number): void {
 }
 
 export function updateLayer(id: string, patch: Partial<AvatarLayer>, record = true): void {
+  if (!ensureLayoutMutable('edit')) return;
   const layer = state.layers.find((l) => l.id === id);
   if (!layer) return;
   if (record) commit();
@@ -379,6 +401,7 @@ export function updateLayer(id: string, patch: Partial<AvatarLayer>, record = tr
 export function scaleLayerBy(id: string, factor: number): void {
   const layer = state.layers.find((l) => l.id === id);
   if (!layer) return;
+  if (!ensureLayoutMutable('resize')) return;
   beginWheelChange();
   layer.size = scaleSizeBy(layer.size, factor, MIN_LAYER_SIZE, maxLayerSize.value);
 }
@@ -387,6 +410,7 @@ export function scaleLayerBy(id: string, factor: number): void {
 export function rotateLayerBy(id: string, degrees: number): void {
   const layer = state.layers.find((l) => l.id === id);
   if (!layer) return;
+  if (!ensureLayoutMutable('rotate')) return;
   beginWheelChange();
   layer.rotation = tidyAngle(layer.rotation + degrees);
 }
@@ -394,6 +418,7 @@ export function rotateLayerBy(id: string, degrees: number): void {
 export function nudgeSelected(dx: number, dy: number): void {
   const layer = selectedLayer.value;
   if (!layer) return;
+  if (!ensureLayoutMutable('move')) return;
   beginNudgeChange();
   const next = clampLayerToDocument(
     { x: layer.x + dx, y: layer.y + dy, size: layer.size },
@@ -407,6 +432,7 @@ export function nudgeSelected(dx: number, dy: number): void {
 export function centerSelected(): void {
   const layer = selectedLayer.value;
   if (!layer) return;
+  if (!ensureLayoutMutable('move')) return;
   commit();
   layer.x = state.document.width / 2;
   layer.y = state.document.height / 2;
@@ -415,6 +441,7 @@ export function centerSelected(): void {
 export function fitSelectedToDocument(): void {
   const layer = selectedLayer.value;
   if (!layer) return;
+  if (!ensureLayoutMutable('resize')) return;
   commit();
   layer.size = clampSize(Math.min(state.document.width, state.document.height) * 0.8);
   layer.x = state.document.width / 2;
@@ -500,9 +527,18 @@ function applySkin(skinId: string): void {
   if (layer) {
     commit();
     layer.skinId = skinId;
-    if (record) layer.name = `${prefix} · ${record.sourceLabel}`;
+    // 协同编辑者的场景里名字是布局的一部分，换肤不动它
+    if (record && !(collabHooks?.isLayoutFrozen() ?? false)) {
+      layer.name = `${prefix} · ${record.sourceLabel}`;
+    }
     notify('success', `已应用到选中的${prefix}`);
+    collabHooks?.onSkinApplied(layer.id);
   } else {
+    // 布局冻结的角色（协同编辑者）没有"新增"这条路：得先点选一个头像再换肤
+    if (collabHooks?.isLayoutFrozen() ?? false) {
+      notify('warn', '先在画布上点选一个头像，再给它换皮肤');
+      return;
+    }
     commit();
     addLayer(skinId);
   }
@@ -514,6 +550,7 @@ function applySkin(skinId: string): void {
  * 否则用户点完 Steve 再点 Alex 会以为在新增，实际却把 Steve 换掉了。
  */
 export function addAvatar(): void {
+  if (!ensureLayoutMutable('add')) return;
   const skinId = state.activeSkinId ?? state.skins[0]?.id ?? null;
   if (!skinId || !skins.has(skinId)) {
     notify('warn', '先从左侧载入一张皮肤，再加头像');
@@ -720,6 +757,7 @@ export async function useSkinUrl(rawUrl: string): Promise<void> {
  * ------------------------------------------------------------------ */
 
 export async function setBaseImage(file: File): Promise<void> {
+  if (!ensureLayoutMutable('base')) return;
   state.busy = '读取图片';
   try {
     const url = URL.createObjectURL(file);
@@ -727,6 +765,7 @@ export async function setBaseImage(file: File): Promise<void> {
       const loaded = await loadImage(url, { cors: false });
       const id = createId('base');
       baseImages.set(id, loaded.element);
+      baseFiles.set(id, file);
       const meta: BaseImageMeta = {
         id,
         name: file.name.replace(/\.[^.]+$/, ''),
@@ -759,6 +798,7 @@ export async function setBaseImage(file: File): Promise<void> {
 }
 
 export function clearBaseImage(): void {
+  if (!ensureLayoutMutable('base')) return;
   commit();
   state.baseImageId = null;
   state.baseImage = null;
@@ -777,6 +817,7 @@ export function fitView(): void {
 }
 
 export function setDocumentSize(width: number, height: number): void {
+  if (!ensureLayoutMutable('doc')) return;
   commit();
   state.document = { width: Math.round(width), height: Math.round(height) };
   for (const layer of state.layers) {
@@ -904,6 +945,7 @@ interface BatchItem {
 
 /** 逐个加载，成功的各占一层；整批只收一条历史，撤销一次就整批退回 */
 async function batchAdd(items: BatchItem[], what: string): Promise<BatchResult> {
+  if (!ensureLayoutMutable('add-batch')) return { ok: 0, failed: [] };
   const ready: { loaded: LoadedImage; provider: string; label: string; origin: SkinOrigin; isCustomImage?: boolean }[] = [];
   const failed: string[] = [];
   for (let index = 0; index < items.length; index += 1) {
@@ -1053,75 +1095,119 @@ export async function useSkinUrls(text: string): Promise<BatchResult> {
 }
 
 /* ------------------------------------------------------------------ *
- * 预设（一张图上的全部头像）
+ * 协同房间文档
  *
- * 预设 = 这张图上所有头像的信息：位置、大小、旋转、不透明度、帽子层、翻转、显隐，
- * 以及各自的皮肤位图（data URI 内嵌，所以文件自包含、换机器能用）。
- * 不含底图：底图是用户自己的照片，套用预设只替换头像，不动图片本身。
+ * 房间里的一条头像记录 = 预设同款 PresetLayer + id + order + updatedAt：
+ * 服务端一头像一键，改内容就是覆盖那一个 key。这里负责三个动作：
+ *  - loadRoomDocument：进房装载（底图 + 头像，沿用服务端 id，历史清零）
+ *  - encodeLayerSkin：把某图层当前皮肤编码成可存储的 PresetSkin
+ *  - collectRoomPayload：发布 / 管理员全量提交时把画布整理成协议载荷
  * ------------------------------------------------------------------ */
 
-const PRESET_STORAGE_KEY = 'blockface.presets.v3';
-
-function storage(): Storage | null {
+/**
+ * 载入一个协同房间：底图 + 全部头像记录。
+ * 与旧套用预设的两个关键差别：
+ *  1. 图层沿用服务端 id —— 之后提交增量要对得上号，不能重新 createId；
+ *  2. 撤销历史清零 —— 进房间的第一眼不该能"撤销"出上一个会话的画布。
+ * 皮肤解不出来的一条回退内置皮肤并计数，与套用预设同一策略。
+ */
+export async function loadRoomDocument(
+  baseFile: File,
+  records: RoomAvatarRecord[],
+  doc: RoomDoc,
+): Promise<{ fallbackSkins: number }> {
+  state.busy = '载入房间';
   try {
-    return typeof localStorage === 'undefined' ? null : localStorage;
-  } catch {
-    // 隐私模式下访问 localStorage 会直接抛异常
-    return null;
-  }
-}
-
-function persistPresets(): void {
-  const store = storage();
-  if (!store) return;
-  // 预设本身只是几 KB 的皮肤位图，一般不会顶到 localStorage 上限；
-  // 但数量多或皮肤特别大时仍可能写不进去，那时的策略是保住最新的几个，而不是整个失败。
-  let keep = state.presets.length;
-  for (; keep >= 0; keep -= 1) {
-    const subset = state.presets.slice(0, keep);
+    const url = URL.createObjectURL(baseFile);
+    let baseLoaded: LoadedImage;
     try {
-      store.setItem(PRESET_STORAGE_KEY, JSON.stringify(subset));
-      if (keep < state.presets.length) {
-        notify(
-          'warn',
-          keep === 0
-            ? '预设太大，没能存进浏览器，刷新后会丢失；先导出成文件更稳妥'
-            : `本地存储放不下全部预设，只有最新的 ${keep} 个能在刷新后保留；建议导出成文件`,
-        );
-      }
-      return;
-    } catch {
-      /* 换少一点再试 */
+      baseLoaded = await loadImage(url, { cors: false });
+    } finally {
+      URL.revokeObjectURL(url);
     }
+    const baseId = createId('base');
+    baseImages.set(baseId, baseLoaded.element);
+    baseFiles.set(baseId, baseFile);
+    baseMeta.set(baseId, {
+      id: baseId,
+      name: baseFile.name.replace(/\.[^.]+$/, '') || '底图',
+      width: baseLoaded.width,
+      height: baseLoaded.height,
+      tainted: baseLoaded.tainted,
+    });
+
+    // 皮肤先全部解出来再动画布：中途失败保持原样，别搅成半成品
+    let fallbackSkins = 0;
+    const ready: { record: RoomAvatarRecord; loaded: LoadedImage; isCustom: boolean; isFrontOnly: boolean }[] = [];
+    let fallbackLoaded: LoadedImage | null = null;
+    for (const record of records) {
+      let loaded: LoadedImage | null = null;
+      let isCustom = false;
+      let isFrontOnly = false;
+      if (record.skin) {
+        try {
+          const candidate = await loadImage(record.skin.dataUrl, { cors: false });
+          isCustom = record.skin.isCustomImage === true;
+          isFrontOnly = record.skin.frontOnly === true;
+          if (isCustom || describeSkin(candidate.width, candidate.height, isFrontOnly).valid) {
+            loaded = candidate;
+          }
+        } catch {
+          /* 走兜底 */
+        }
+      }
+      if (!loaded) {
+        try {
+          if (!fallbackLoaded) fallbackLoaded = await loadImage(BUILTIN_SKINS[0].url, { cors: false });
+          loaded = fallbackLoaded;
+        } catch {
+          continue; // 连内置皮肤都取不到：这一条只能跳过
+        }
+        isCustom = false;
+        isFrontOnly = false;
+        fallbackSkins += 1;
+      }
+      ready.push({ record, loaded, isCustom, isFrontOnly });
+    }
+
+    past.length = 0;
+    future.length = 0;
+    openChange = false;
+    state.baseImageId = baseId;
+    state.baseImage = baseMeta.get(baseId) ?? null;
+    state.document = { ...doc };
+    state.layers.length = 0;
+    for (const item of ready) {
+      const skinId = createId('skin');
+      // 房间头像是预设同款记录：origin 沿用 preset，渲染与缩略图管线零改动
+      registerSkin(item.loaded, 'preset', item.record.name, '房间', skinId, false, item.isCustom, item.isFrontOnly);
+      state.layers.push({
+        id: item.record.id,
+        skinId,
+        name: item.record.name,
+        x: item.record.x,
+        y: item.record.y,
+        size: clampSize(item.record.size),
+        rotation: item.record.rotation,
+        opacity: item.record.opacity,
+        overlay: item.record.overlay,
+        flipH: item.record.flipH,
+        visible: item.record.visible,
+      });
+    }
+    sweepUnusedBaseImages();
+    const top = state.layers.at(-1) ?? null;
+    state.selectedId = top?.id ?? null;
+    if (top) state.activeSkinId = top.skinId;
+    fitView();
+    state.skinRevision += 1;
+    return { fallbackSkins };
+  } finally {
+    state.busy = null;
   }
-  notify('warn', '预设写入本地存储失败（可能是存储空间已满），建议导出成文件');
 }
 
-/** 从 localStorage 恢复预设；坏数据直接丢弃，不影响启动 */
-export function loadPresets(): void {
-  const store = storage();
-  if (!store) return;
-  const raw = store.getItem(PRESET_STORAGE_KEY);
-  if (!raw) return;
-  try {
-    state.presets = parsePresetFile(raw);
-  } catch {
-    state.presets = [];
-  }
-}
-
-function uniquePresetName(base: string, exceptId?: string): string {
-  const name = base.trim().slice(0, 40) || '预设';
-  const taken = new Set(state.presets.filter((p) => p.id !== exceptId).map((p) => p.name));
-  if (!taken.has(name)) return name;
-  for (let i = 2; i < 100; i += 1) {
-    const candidate = `${name} ${i}`;
-    if (!taken.has(candidate)) return candidate;
-  }
-  return name;
-}
-
-/** 皮肤位图 → PNG data URI 与实际尺寸；MC皮肤仅存正脸双层（底层与帽子层并排，16×8 等比），通用头像等比限制在 512px 内以防超出 1.5MB 限制与 LocalStorage 溢出；画布被污染时返回 null */
+/** 皮肤位图 → PNG data URI 与实际尺寸；MC皮肤仅存正脸双层（底层与帽子层并排，16×8 等比），通用头像等比限制在 512px 内以防超出 1.5MB 限制；画布被污染时返回 null */
 function skinToDataUrl(skin: SkinTexture): { dataUrl: string; width: number; height: number; frontOnly?: boolean } | null {
   try {
     const isCustom = skin.meta.isCustomImage === true;
@@ -1146,7 +1232,7 @@ function skinToDataUrl(skin: SkinTexture): { dataUrl: string; width: number; hei
       return { dataUrl, width: w, height: h };
     }
 
-    // 预设仅存正脸双层：底层正脸与帽子层正脸并排，尺寸为 (16*scale) × (8*scale)
+    // 房间记录仅存正脸双层：底层正脸与帽子层正脸并排，尺寸为 (16*scale) × (8*scale)
     const scale = skin.meta.scale;
     const faceSize = 8 * scale;
     const w = faceSize * 2;
@@ -1177,30 +1263,54 @@ function skinToDataUrl(skin: SkinTexture): { dataUrl: string; width: number; hei
   }
 }
 
-/** 把当前全部头像图层与皮肤排版存成预设（底图属于用户文档，不存入预设） */
-export function saveCurrentAsPreset(): void {
-  if (state.presets.length >= MAX_PRESETS) {
-    notify('warn', `预设最多 ${MAX_PRESETS} 个，先删掉几个再存`);
-    return;
-  }
-  if (state.layers.length === 0) {
-    notify('warn', '画布上还没有头像，先放一个再存');
-    return;
-  }
+/** 把一个图层当前的皮肤编码成可存储的 PresetSkin（缺图或画布污染时返回 null） */
+export function encodeLayerSkin(layerId: string): PresetSkin | null {
+  const layer = state.layers.find((l) => l.id === layerId);
+  if (!layer) return null;
+  const skin = getSkin(layer.skinId);
+  if (!skin) return null;
+  const encoded = skinToDataUrl(skin);
+  if (!encoded) return null;
+  // frontOnly 必须原样传下去：它是渲染时判别正脸双层贴图的唯一依据
+  return createPresetSkin({ ...encoded, isCustomImage: skin.meta.isCustomImage === true });
+}
 
-  const layers: PresetLayer[] = [];
-  let missingSkin = 0;
-  for (const layer of state.layers) {
-    const skin = getSkin(layer.skinId);
-    const encoded = skin ? skinToDataUrl(skin) : null;
-    // 走 createPresetSkin 而不是手拼字段：frontOnly 是渲染时判别正脸双层贴图的唯一依据，
-    // 漏掉它，256/512 高清皮肤存出来的 64×32 / 128×64 就会被当成旧版整肤
-    const embedded: PresetSkin | null =
-      encoded && skin
-        ? createPresetSkin({ ...encoded, isCustomImage: skin.meta.isCustomImage === true })
-        : null;
-    if (!embedded) missingSkin += 1;
-    layers.push({
+/** 发布 / 管理员全量提交：把当前画布整理成房间协议载荷 */
+export function collectRoomPayload(): {
+  baseFile: File | null;
+  doc: { width: number; height: number };
+  baseImage: { name: string; type: string; width: number; height: number } | null;
+  layers: {
+    id: string;
+    name: string;
+    x: number;
+    y: number;
+    size: number;
+    rotation: number;
+    opacity: number;
+    overlay: boolean;
+    flipH: boolean;
+    visible: boolean;
+    order: number;
+    skin: PresetSkin | null;
+  }[];
+  failedSkins: number;
+} {
+  const baseFile = state.baseImageId ? baseFiles.get(state.baseImageId) ?? null : null;
+  const baseImage = state.baseImage
+    ? {
+        name: state.baseImage.name,
+        type: baseFile?.type ?? 'image/png',
+        width: state.document.width,
+        height: state.document.height,
+      }
+    : null;
+  let failedSkins = 0;
+  const layers = state.layers.map((layer, index) => {
+    const skin = encodeLayerSkin(layer.id);
+    if (!skin) failedSkins += 1;
+    return {
+      id: layer.id,
       name: layer.name,
       x: layer.x,
       y: layer.y,
@@ -1210,205 +1320,12 @@ export function saveCurrentAsPreset(): void {
       overlay: layer.overlay,
       flipH: layer.flipH,
       visible: layer.visible,
-      skin: embedded,
-    });
-  }
-
-  const preset: Preset = {
-    id: createId('preset'),
-    name: uniquePresetName(state.baseImage ? state.baseImage.name : `${layers.length} 个头像`),
-    createdAt: Date.now(),
-    layers,
-  };
-
-  state.presets.unshift(preset);
-  persistPresets();
-  const pictures = countEmbeddedImages(preset);
-  notify(
-    missingSkin ? 'warn' : 'success',
-    missingSkin
-      ? `已存为预设「${preset.name}」，但有 ${missingSkin} 个头像的皮肤没能一起存进去`
-      : `已把这张图上的 ${layers.length} 个头像存为预设「${preset.name}」（内嵌 ${pictures} 张皮肤）`,
-  );
+      order: index,
+      skin,
+    };
+  });
+  return { baseFile, doc: { ...state.document }, baseImage, layers, failedSkins };
 }
-
-/**
- * 套用预设：用预设里的这组头像替换当前画布上的全部头像。
- * 底图与画布尺寸一概不动 —— 预设管的是头像，图片是用户自己的。
- * 整个过程只收一条历史，撤销一次就回到套用前的样子。
- */
-export async function applyPreset(id: string): Promise<void> {
-  const preset = state.presets.find((p) => p.id === id);
-  if (!preset) return;
-
-  state.busy = `载入预设 ${preset.name}`;
-  try {
-    // 要用的皮肤先全部解出来：中途失败就保持原样，不把画布搅成半成品
-    const ready: { layer: PresetLayer; loaded: LoadedImage; isCustom: boolean; isFrontOnly: boolean }[] = [];
-    let fallbackLoaded: LoadedImage | null = null;
-    let fallbackCount = 0;
-
-    async function getFallbackSkin(): Promise<LoadedImage | null> {
-      if (fallbackLoaded) return fallbackLoaded;
-      try {
-        fallbackLoaded = await loadImage(BUILTIN_SKINS[0].url, { cors: false });
-        return fallbackLoaded;
-      } catch {
-        return null;
-      }
-    }
-
-    for (const item of preset.layers) {
-      let loaded: LoadedImage | null = null;
-      let isCustom = false;
-      let isFrontOnly = false;
-      if (item.skin) {
-        try {
-          const l = await loadImage(item.skin.dataUrl, { cors: false });
-          isCustom = item.skin.isCustomImage === true;
-          isFrontOnly = item.skin.frontOnly === true;
-          if (isCustom || describeSkin(l.width, l.height, isFrontOnly).valid) {
-            loaded = l;
-          }
-        } catch {
-          /* 走兜底 */
-        }
-      }
-      if (!loaded) {
-        loaded = await getFallbackSkin();
-        isCustom = false;
-        isFrontOnly = false;
-        fallbackCount += 1;
-      }
-      if (loaded) {
-        ready.push({ layer: item, loaded, isCustom, isFrontOnly });
-      }
-    }
-
-    commit();
-
-    state.layers.length = 0;
-    for (const item of ready) {
-      const skinId = createId('skin');
-      registerSkin(item.loaded, 'preset', preset.name, '预设', skinId, false, item.isCustom, item.isFrontOnly);
-      const size = clampSize(item.layer.size);
-      const placed = clampLayerToDocument(
-        { x: item.layer.x, y: item.layer.y, size },
-        state.document.width,
-        state.document.height,
-      );
-      state.layers.push({
-        id: createId('layer'),
-        skinId,
-        name: item.layer.name,
-        overlay: item.layer.overlay,
-        x: placed.x,
-        y: placed.y,
-        size,
-        rotation: item.layer.rotation,
-        opacity: item.layer.opacity,
-        flipH: item.layer.flipH,
-        visible: item.layer.visible,
-      });
-    }
-    const top = state.layers.at(-1) ?? null;
-    state.selectedId = top?.id ?? null;
-    if (top) state.activeSkinId = top.skinId;
-    fitView();
-
-    const parts = [`${ready.length} 个头像`, '底图未改动'];
-    if (fallbackCount > 0) parts.push(`${fallbackCount} 个头像皮肤缺失，已回退为内置皮肤`);
-    notify(fallbackCount > 0 ? 'warn' : 'success', `已套用预设「${preset.name}」：${parts.join(' · ')}`);
-  } catch (error) {
-    notify('error', `套用预设失败：${(error as Error).message}`);
-  } finally {
-    state.busy = null;
-  }
-}
-
-export function removePreset(id: string): void {
-  const index = state.presets.findIndex((p) => p.id === id);
-  if (index < 0) return;
-  state.presets.splice(index, 1);
-  persistPresets();
-}
-
-/** 改名：预设是给人认的，名字得能自己定 */
-export function renamePreset(id: string, name: string): void {
-  const preset = state.presets.find((p) => p.id === id);
-  if (!preset) return;
-  const clean = name.trim().slice(0, 40);
-  if (!clean || clean === preset.name) return;
-  preset.name = uniquePresetName(clean, id);
-  persistPresets();
-}
-
-export function exportPresets(): void {
-  if (state.presets.length === 0) {
-    notify('warn', '还没有预设可以导出');
-    return;
-  }
-  const blob = new Blob([serializePresetFile(state.presets)], { type: 'application/json' });
-  downloadBlob(blob, suggestPresetFilename());
-  notify('success', `已导出 ${state.presets.length} 个预设`);
-}
-
-/** 只比头像信息：名字与时间不参与，所以本地改过名也算同一条 */
-function presetContent(preset: Preset): string {
-  return JSON.stringify(preset.layers);
-}
-
-/**
- * 导入预设。同一份文件反复导入不该越堆越多：
- * 同 id 且内容一致 → 跳过；同 id 内容变了 → 就地更新（保留本地改过的名字）；
- * 不同 id 但内容一模一样 → 也当成重复跳过；其余才算新增。
- */
-export async function importPresets(file: File): Promise<void> {
-  state.busy = `导入 ${file.name}`;
-  try {
-    const incoming = parsePresetFile(await file.text());
-    let added = 0;
-    let updated = 0;
-    let skipped = 0;
-    for (const preset of incoming) {
-      const index = state.presets.findIndex((p) => p.id === preset.id);
-      if (index >= 0) {
-        if (presetContent(state.presets[index]) === presetContent(preset)) {
-          skipped += 1;
-          continue;
-        }
-        state.presets.splice(index, 1, { ...preset, name: state.presets[index].name });
-        updated += 1;
-        continue;
-      }
-      if (state.presets.some((p) => presetContent(p) === presetContent(preset))) {
-        skipped += 1;
-        continue;
-      }
-      if (state.presets.length >= MAX_PRESETS) {
-        skipped += 1;
-        continue;
-      }
-      state.presets.unshift({ ...preset, name: uniquePresetName(preset.name) });
-      added += 1;
-    }
-
-    if (added > 0 || updated > 0) persistPresets();
-    const parts: string[] = [];
-    if (added > 0) parts.push(`新增 ${added} 个`);
-    if (updated > 0) parts.push(`更新 ${updated} 个`);
-    if (skipped > 0) parts.push(`跳过 ${skipped} 个已存在的`);
-    const tone = added > 0 || updated > 0 ? 'success' : 'warn';
-    notify(tone, parts.length ? `导入完成：${parts.join('，')}` : '文件里没有预设');
-  } catch (error) {
-    notify('error', error instanceof PresetParseError ? error.message : '预设文件读取失败');
-  } finally {
-    state.busy = null;
-  }
-}
-
-// 启动时恢复本地预设
-loadPresets();
 
 /* ------------------------------------------------------------------ *
  * 移动端抽屉 / 面板导航状态
