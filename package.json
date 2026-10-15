@@ -1,8 +1,8 @@
 {
-  "name": "blockface",
+  "name": "blockface-plus",
   "private": true,
   "version": "0.1.0",
-  "description": "BlockFace —— 纯前端工具：上传图片，贴上 Minecraft 头像，调整大小位置后导出 PNG。",
+  "description": "BlockFace+ —— BlockFace 的在线协同版：发布底图与头像布局，成员凭链接与密码换头像内容，到期自动清理。",
   "author": "Dainsleif",
   "license": "Apache-2.0",
   "packageManager": "pnpm@10.8.1",
@@ -14,10 +14,12 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "vue-tsc -b",
-    "e2e": "node tools/run-e2e.mjs"
+    "e2e": "node tools/run-e2e.mjs",
+    "dev:api": "edgeone makers dev -n blockface-plus"
   },
   "dependencies": {
-    "vue": "^3.5.42"
+    "vue": "^3.5.42",
+    "@edgeone/pages-blob": "^0.0.14"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",
