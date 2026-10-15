@@ -1,4 +1,4 @@
-/*! BlockFace · Copyright 2026 Dainsleif · Apache License 2.0  */
+/*! BlockFace+ · Copyright 2026 Dainsleif · Apache License 2.0  */
 import { createApp } from 'vue';
 import './styles/tokens.css';
 import App from './App.vue';
@@ -10,5 +10,8 @@ createApp(App).mount('#app');
 if (import.meta.env.DEV) {
   void import('./stores/editor').then((store) => {
     (window as unknown as Record<string, unknown>).__blockface = store;
+  });
+  void import('./stores/collab').then((store) => {
+    (window as unknown as Record<string, unknown>).__blockfaceplus = store;
   });
 }

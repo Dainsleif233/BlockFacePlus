@@ -348,13 +348,23 @@ try {
   }
 }
 
-// ============ 8b. 预设 = 整张图片模板 ============
-const { serializePresetFile, parsePresetFile } = await import('/src/core/model/preset.ts');
+// ============ 8b. 协同发布（页内 mock 后端） ============
+// 预设功能已由「共同编辑」取代：这一节验证发布链路 —— 创建房间（带完整布局），
+// 底图走预签名 URL 直传，回执确认后房间就绪。后端由 src/dev/collabMock.ts 模拟。
+const { installCollabMock } = await import('/src/dev/collabMock.ts');
+const collabStore = await import('/src/stores/collab.ts');
 
-// 从干净画布开始，后面每个数字都能硬写
 store.clearBaseImage();
 for (const item of [...editor.layers]) store.removeLayer(item.id);
 await sleep(300);
+
+// 没底图就点发布：应当被拦下并留在表单
+await collabStore.publishRoom(7);
+await sleep(200);
+check('没有底图时发布被拦下',
+  collabStore.publishState.step === 'form' && collabStore.publishState.error.indexOf('底图') >= 0,
+  collabStore.publishState.step + ' / ' + collabStore.publishState.error);
+
 
 // 造一张真底图并走真实的上传路径（含底图 data URI 的留存）
 const baseCanvas = document.createElement('canvas');
@@ -384,134 +394,57 @@ store.updateLayer(layerB.id, { x: 230, y: 60, size: 80, rotation: -20, opacity: 
 await sleep(400);
 check('准备好一张底图加两个头像', editor.layers.length === 2, 'layers=' + editor.layers.length);
 
-const presetsBefore = editor.presets.length;
-store.saveCurrentAsPreset();
-await sleep(400);
-check('把整张图存为预设', editor.presets.length === presetsBefore + 1, 'presets=' + editor.presets.length);
 
-const saved = editor.presets[0];
-check('预设只装头像，不含底图与画布尺寸',
-  !('base' in saved) && !('width' in saved) && !('height' in saved),
-  Object.keys(saved).sort().join(','));
-check('预设记下了这张图上的全部头像',
-  saved.layers.length === 2 && saved.layers[0].size === 120 && saved.layers[1].size === 80,
-  saved.layers.length + ' 个头像 · ' + JSON.stringify(saved.layers.map((l) => ({ x: l.x, size: l.size }))));
-check('预设逐层记下了变换与内嵌皮肤',
-  saved.layers[0].size === 120 && saved.layers[0].rotation === 15 && Math.abs(saved.layers[0].opacity - 0.8) < 1e-6
-    && saved.layers[0].overlay === false && !!saved.layers[0].skin && !!saved.layers[1].skin,
-  JSON.stringify({ size: saved.layers[0].size, rot: saved.layers[0].rotation, overlay: saved.layers[0].overlay, skin: !!saved.layers[0].skin }));
+// —— 发布执行（后端由页内 mock 模拟） ——
+const publishMock = installCollabMock({
+  roomId: 'e2eroom' + Math.random().toString(36).slice(2, 6),
+  editPassword: 'edit-e2e',
+  adminPassword: 'admin-e2e-12',
+  doc: { width: 320, height: 200 },
+  baseImage: { name: '我的底图.png', type: 'image/png', width: 320, height: 200 },
+  baseBlob: await new Promise((resolve) => baseCanvas.toBlob(resolve, 'image/png')),
+});
 
-const stored = localStorage.getItem('blockface.presets.v3');
-let storedCount = -1;
-try { storedCount = JSON.parse(stored).length; } catch { storedCount = -1; }
-check('预设已写入 localStorage', storedCount === editor.presets.length, '条目=' + storedCount);
+await collabStore.publishRoom(7);
+await sleep(1200);
+const published = collabStore.publishState.result;
+check('发布成功拿到房间号与两个密码',
+  !!published && /^[A-Za-z0-9_-]{6,64}$/.test(published.roomId) && !!published.editPassword && !!published.adminPassword,
+  published ? ('roomId=' + published.roomId) : ('step=' + collabStore.publishState.step + ' / ' + collabStore.publishState.error));
+check('过期时间落在 7 天附近',
+  !!published && published.expiresAt > Date.now() + 6 * 86400000 && published.expiresAt < Date.now() + 8 * 86400000,
+  published ? new Date(published.expiresAt).toISOString() : '没有结果');
+check('分享链接带上了房间号',
+  !!published && collabStore.publishState.result.shareUrl.indexOf('room=' + published.roomId) >= 0,
+  published ? collabStore.publishState.result.shareUrl : '没有结果');
 
-const json = serializePresetFile(editor.presets);
-const reparsed = parsePresetFile(json);
-check('导出的 JSON 能被解析回同样内容',
-  reparsed.length === editor.presets.length && reparsed[0].layers.length === 2 && !!reparsed[0].layers[0].skin,
-  json.length + ' 字符');
+const createCall = publishMock.calls.find((c) => c.method === 'POST' && c.path === '/api/rooms');
+check('创建请求带了完整布局快照',
+  !!createCall && createCall.body.layers.length === 2 && !!createCall.body.layers[0].skin.dataUrl,
+  createCall ? ('layers=' + createCall.body.layers.length) : '没有创建请求');
+check('创建请求的层不带 updatedAt（服务端职责）',
+  !!createCall && !('updatedAt' in createCall.body.layers[0]),
+  createCall ? Object.keys(createCall.body.layers[0]).join(',') : '');
+check('过期天数随发布请求走（发了 7 天）',
+  !!createCall && createCall.body.expiresDays === 7,
+  createCall ? String(createCall.body.expiresDays) : '');
+const uploadCall = publishMock.calls.find((c) => c.method === 'PUT' && c.path === '/mock-upload');
+check('底图字节走预签名直传（绕过函数）',
+  !!uploadCall && uploadCall.bytes > 1000,
+  uploadCall ? uploadCall.bytes + ' bytes' : '没有直传');
+const confirmCall = published && publishMock.calls.find((c) => c.path === '/api/rooms/' + published.roomId + '/base');
+check('回执确认用编辑密码并切到 ready',
+  !!confirmCall && confirmCall.password === 'edit-e2e' && confirmCall.body.intent === 'confirm' && publishMock.state.status === 'ready',
+  confirmCall ? ('pwd=' + confirmCall.password + ' / status=' + publishMock.state.status) : '没有确认请求');
+check('发布链路无协议违规',
+  publishMock.violations.length === 0,
+  publishMock.violations.join('；'));
 
-// 导入是"合并"而不是"追加"：同一份文件导多少次都不该越堆越多
-const countBeforeImport = editor.presets.length;
-await store.importPresets(new File([json], 'presets.json', { type: 'application/json' }));
-await sleep(500);
-check('同一份文件导入不会重复添加',
-  editor.presets.length === countBeforeImport && countBeforeImport === presetsBefore + 1,
-  countBeforeImport + ' → ' + editor.presets.length + ' / ' + (editor.notice ? editor.notice.message : ''));
-check('重复导入会明确说是跳过的',
-  !!editor.notice && /跳过/.test(editor.notice.message),
-  editor.notice ? editor.notice.message : 'null');
+// 把凭据递给运行器，驱动后两个阶段（编辑者 / 管理员）
+window.__BFPLUS_PUBLISH__ = published
+  ? { roomId: published.roomId, editPassword: 'edit-e2e', adminPassword: 'admin-e2e-12' }
+  : null;
 
-// 套用 = 用预设里的这组头像替换画布上的头像；底图与画布尺寸一概不动
-const baseIdBefore = editor.baseImageId;
-const docBefore = editor.document.width + '×' + editor.document.height;
-for (const item of [...editor.layers]) store.removeLayer(item.id);
-await sleep(400);
-check('删掉全部头像后底图还在、尺寸没变',
-  editor.layers.length === 0 && editor.baseImageId === baseIdBefore && editor.document.width + '×' + editor.document.height === docBefore,
-  'layers=' + editor.layers.length + ' base=' + editor.baseImageId + ' ' + editor.document.width + '×' + editor.document.height);
-
-const target = editor.presets[0];
-await store.applyPreset(target.id);
-await sleep(1100);
-check('套用预设没有动底图，也没动画布尺寸',
-  editor.baseImageId === baseIdBefore && editor.document.width + '×' + editor.document.height === docBefore,
-  'base=' + editor.baseImageId + '(' + baseIdBefore + ') ' + editor.document.width + '×' + editor.document.height);
-check('套用预设把这一组头像放回来了', editor.layers.length === 2, 'layers=' + editor.layers.length);
-const restored = editor.layers[0];
-check('套用预设逐层还原了变换',
-  restored.size === 120 && restored.rotation === 15 && Math.abs(restored.opacity - 0.8) < 1e-6 && restored.overlay === false,
-  JSON.stringify({ size: restored.size, rot: restored.rotation, opacity: restored.opacity, overlay: restored.overlay }));
-check('套用预设登记了来源为 preset 的皮肤',
-  editor.skins.filter((s) => s.origin === 'preset' && s.sourceLabel === target.name).length === 2,
-  editor.skins.map((s) => s.origin).join(','));
-
-// 画布上真的画了底图：左上角 40×40 那块是 #d9a441
-const tplDoc = document.querySelector('.artboard__doc');
-const tplRect = document.querySelector('.artboard').getBoundingClientRect();
-const tplScale = (tplRect.width - 2) / editor.document.width;
-const tplDpr = Math.min(window.devicePixelRatio || 1, 2);
-const readTplDoc = (x, y) => Array.from(tplDoc.getContext('2d').getImageData(Math.round(x * tplScale * tplDpr), Math.round(y * tplScale * tplDpr), 1, 1).data);
-const corner = readTplDoc(6, 6);
-check('底图始终还在画布上（预设没把它顶掉）',
-  Math.abs(corner[0] - 217) <= 2 && Math.abs(corner[1] - 164) <= 2 && Math.abs(corner[2] - 65) <= 2,
-  '左上角=' + JSON.stringify(corner) + ' 期望≈[217,164,65]');
-
-const avatarPixel = readTplDoc(90, 100);
-check('头像也画在原来的位置上', avatarPixel[3] === 255 && !(avatarPixel[0] === 217 && avatarPixel[1] === 164 && avatarPixel[2] === 65),
-  '头像中心=' + JSON.stringify(avatarPixel));
-
-store.undo();
-await sleep(500);
-check('套用预设是一次可撤销的替换',
-  editor.layers.length === 0 && editor.baseImageId === baseIdBefore,
-  'layers=' + editor.layers.length + ' base=' + editor.baseImageId);
-store.redo();
-await sleep(900);
-check('重做又能把这一组头像放回来', editor.layers.length === 2 && editor.baseImageId === baseIdBefore,
-  'layers=' + editor.layers.length + ' base=' + editor.baseImageId);
-
-// 同 id 但内容变了 → 就地更新，仍然不新增
-const mutated = JSON.parse(json);
-mutated.presets[0].layers[0].size = 999;
-await store.importPresets(new File([JSON.stringify(mutated)], 'mutated.json', { type: 'application/json' }));
-await sleep(500);
-check('同 id 内容变了就地更新，而不是新增一条',
-  editor.presets.length === countBeforeImport && editor.presets[0].layers[0].size === 999,
-  'presets=' + editor.presets.length + ' size=' + editor.presets[0].layers[0].size);
-
-// 改名：预设是给人认的。先再存一个，才验得了"撞名自动加序号"
-store.saveCurrentAsPreset();
-await sleep(400);
-check('再存一个预设（用于改名与撞名测试）',
-  editor.presets.length === countBeforeImport + 1,
-  'presets=' + editor.presets.length);
-
-const nameBefore = editor.presets[0].name;
-store.renamePreset(editor.presets[0].id, '  我的常用摆法  ');
-await sleep(200);
-check('预设能改名，首尾空格会被去掉',
-  editor.presets[0].name === '我的常用摆法',
-  nameBefore + ' → ' + editor.presets[0].name);
-store.renamePreset(editor.presets[0].id, editor.presets[1].name);
-await sleep(200);
-check('改名撞上已有名字时自动加序号',
-  editor.presets[0].name !== editor.presets[1].name,
-  editor.presets.map((p) => p.name).join(' / '));
-
-const beforeRemove = editor.presets.length;
-store.removePreset(target.id);
-await sleep(200);
-check('删除预设', editor.presets.length === beforeRemove - 1, beforeRemove + ' → ' + editor.presets.length);
-
-await store.importPresets(new File(['not json at all'], 'bad.json', { type: 'application/json' }));
-await sleep(300);
-check('垃圾文件被拒绝且不影响已有预设',
-  editor.presets.length === beforeRemove - 1 && editor.notice && editor.notice.tone === 'error',
-  (editor.notice && editor.notice.message) + ' / presets=' + editor.presets.length);
-
-localStorage.removeItem('blockface.presets.v3');
 
 // 本节故意用了 0.8 不透明度与旋转来验证还原；后面的导出用例要求不透明、不旋转的图层，
 // 所以这里把这两项恢复成默认值，别把状态漏给下一节。
@@ -824,9 +757,10 @@ check('一次批量有上限，手一抖粘一百个也不会炸',
   store.splitBatchInput(Array.from({ length: 40 }, (_, i) => 'player' + i).join(' ')).length === store.MAX_BATCH,
   'MAX_BATCH=' + store.MAX_BATCH);
 
-// ============ 12. 高清皮肤存预设再套用：逐像素还原 ============
-// 256 皮肤存出来的是 64×32 正脸双层，与 64×32 旧版整肤同尺寸。
+// ============ 12. 高清皮肤编解码往返：逐像素还原 ============
+// 256 皮肤编码出来的是 64×32 正脸双层，与 64×32 旧版整肤同尺寸。
 // 正脸画成 8×8 每像素一色，一旦被判成旧版、从错误区域取样，像素差异立刻暴露。
+// 预设已下线，这条链路改走协同协议：encodeLayerSkin 编码 → loadRoomDocument 按服务端记录装回。
 const hdFrontCanvas = document.createElement('canvas');
 hdFrontCanvas.width = 256;
 hdFrontCanvas.height = 256;
@@ -841,37 +775,51 @@ const hdFrontBlob = await new Promise((r) => hdFrontCanvas.toBlob(r, 'image/png'
 await store.useSkinFile(new File([hdFrontBlob], 'hd-front.png', { type: 'image/png' }));
 await sleep(400);
 const hdFrontRecord = editor.skins[editor.skins.length - 1];
-check('高清皮肤就位（用于预设往返）', /^256×256 · 高清/.test(hdFrontRecord.meta.label), hdFrontRecord.meta.label);
+check('高清皮肤就位（用于编解码往返）', /^256×256 · 高清/.test(hdFrontRecord.meta.label), hdFrontRecord.meta.label);
 
 store.addAvatar();
 await sleep(320);
 const hdFrontLayer = editor.layers[editor.layers.length - 1];
-const headBeforePreset = renderHeadCanvasRef(store.getSkin(hdFrontLayer.skinId), { overlay: false, pixelSize: 64 });
+const headBeforeRound = renderHeadCanvasRef(store.getSkin(hdFrontLayer.skinId), { overlay: false, pixelSize: 64 });
 
-store.saveCurrentAsPreset();
-await sleep(400);
-const hdPreset = editor.presets[0];
-const hdEmbedded = hdPreset.layers.map((l) => l.skin).filter(Boolean).find((s) => s.width === 64 && s.height === 32) || null;
-check('高清皮肤存进预设时只留 64×32 正脸双层',
-  !!hdEmbedded, hdEmbedded ? hdEmbedded.width + '×' + hdEmbedded.height : '预设里找不到 64×32 材质');
-check('正脸双层标记跟着进预设（丢了就会被当成 64×32 旧版整肤）',
-  !!hdEmbedded && hdEmbedded.frontOnly === true, hdEmbedded ? 'frontOnly=' + hdEmbedded.frontOnly : '没有材质');
+const hdEncoded = store.encodeLayerSkin(hdFrontLayer.id);
+check('高清皮肤编码成 64×32 正脸双层',
+  !!hdEncoded && hdEncoded.width === 64 && hdEncoded.height === 32,
+  hdEncoded ? hdEncoded.width + '×' + hdEncoded.height : '编码失败');
+check('正脸双层标记跟着编码走（丢了就会被当成 64×32 旧版整肤）',
+  !!hdEncoded && hdEncoded.frontOnly === true,
+  hdEncoded ? 'frontOnly=' + hdEncoded.frontOnly : '没有材质');
 
-for (const item of [...editor.layers]) store.removeLayer(item.id);
-await sleep(320);
-await store.applyPreset(hdPreset.id);
-await sleep(1100);
-const restoredHdLayer = editor.layers[editor.layers.length - 1];
-const restoredHdSkin = store.getSkin(restoredHdLayer.skinId);
-check('套用预设后仍认得出是正脸双层', !!restoredHdSkin && restoredHdSkin.meta.frontOnly === true,
+// 走 loadRoomDocument 完整往返：把编码结果当作服务端记录装回来
+const roundBase = store.getBaseImage(editor.baseImageId);
+check('编解码往返有底图可导出', !!roundBase, roundBase ? roundBase.naturalWidth + '×' + roundBase.naturalHeight : '没有底图');
+const roundCanvas = document.createElement('canvas');
+roundCanvas.width = roundBase.naturalWidth;
+roundCanvas.height = roundBase.naturalHeight;
+roundCanvas.getContext('2d').drawImage(roundBase, 0, 0);
+const roundBlob = await new Promise((r) => roundCanvas.toBlob(r, 'image/png'));
+const roundRecords = [{
+  id: 'srv-hd1',
+  name: hdFrontLayer.name,
+  x: hdFrontLayer.x, y: hdFrontLayer.y, size: hdFrontLayer.size,
+  rotation: 0, opacity: 1, overlay: hdFrontLayer.overlay, flipH: hdFrontLayer.flipH,
+  visible: true, order: 0,
+  skin: hdEncoded,
+  updatedAt: 42,
+}];
+await store.loadRoomDocument(new File([roundBlob], 'round.png', { type: 'image/png' }), roundRecords,
+  { width: editor.document.width, height: editor.document.height });
+await sleep(1300);
+const restoredHdLayer = editor.layers.find((l) => l.id === 'srv-hd1');
+check('服务器 id 原样回到图层上', !!restoredHdLayer, editor.layers.map((l) => l.id).join(','));
+const restoredHdSkin = store.getSkin(restoredHdLayer ? restoredHdLayer.skinId : null);
+check('往返后仍认得出是正脸双层', !!restoredHdSkin && restoredHdSkin.meta.frontOnly === true,
   restoredHdSkin ? restoredHdSkin.meta.label : '没有皮肤');
-const restoreDiff = countDiff(headBeforePreset, renderHeadCanvasRef(restoredHdSkin, { overlay: false, pixelSize: 64 }));
-check('套用预设后的头像与保存前逐像素一致', restoreDiff.pixels === 0,
-  '不一致 ' + restoreDiff.pixels + '/4096 像素，最大色差 ' + restoreDiff.maxChannel);
+const roundDiff = countDiff(headBeforeRound, renderHeadCanvasRef(restoredHdSkin, { overlay: false, pixelSize: 64 }));
+check('往返后的头像与保存前逐像素一致', roundDiff.pixels === 0,
+  '不一致 ' + roundDiff.pixels + '/4096 像素，最大色差 ' + roundDiff.maxChannel);
 
-store.removePreset(hdPreset.id);
-await sleep(200);
 
 const failed = results.filter((r) => !r.pass);
 const skipped = results.filter((r) => r.skipped);
-return { total: results.length, failed: failed.length, skipped: skipped.length, results };
+return { total: results.length, failed: failed.length, skipped: skipped.length, results, publish: window.__BFPLUS_PUBLISH__ || null };
