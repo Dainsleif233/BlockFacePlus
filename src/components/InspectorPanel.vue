@@ -1,29 +1,22 @@
 <!-- BlockFace · Copyright 2026 Dainsleif · Apache License 2.0 -->
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref } from 'vue';
-import type { PresetSkin } from '../core/model/preset';
+import { computed, ref } from 'vue';
 import { MIN_LAYER_SIZE, type AvatarLayer } from '../core/model/types';
-import { describeSkin, type SkinOrigin } from '../core/skin/texture';
+import { dirtyCount, locked as collabLocked } from '../stores/collab';
 import {
   addAvatar,
-  applyPreset,
   beginChange,
   centerSelected,
   duplicateLayer,
   editor,
   endChange,
-  exportPresets,
   fitSelectedToDocument,
   getSkin,
-  importPresets,
   maxLayerSize,
   mobilePanel,
   moveLayerTo,
   nudgeLayerOrder,
   removeLayer,
-  removePreset,
-  renamePreset,
-  saveCurrentAsPreset,
   selectLayer,
   setMobilePanel,
   updateLayer,
@@ -41,13 +34,7 @@ interface SliderSpec {
   factor: number;
 }
 
-const ORIGIN_COLOR: Record<SkinOrigin, string> = {
-  builtin: 'var(--bf-grass)',
-  account: 'var(--bf-gold)',
-  upload: 'var(--bf-cyan)',
-  url: 'var(--bf-red)',
-  preset: 'var(--bf-ink)',
-};
+
 
 /**
  * 图层列表按"看得见的顺序"排：上层在列表上方，跟画面上的遮挡关系一致。
@@ -71,6 +58,7 @@ function rowAt(list: HTMLElement, clientY: number): number {
 
 /** 在整张列表上做事件委托，两个列表（有选中 / 没选中）共用同一套拖动逻辑 */
 function onListPointerDown(event: PointerEvent): void {
+  if (collabLocked.value) return; // 协同编辑者：顺序也是布局，不能拖
   const row = (event.target as HTMLElement).closest<HTMLElement>('li[data-layer-id]');
   if (!row || event.button !== 0) return;
   const id = row.dataset.layerId;
@@ -103,6 +91,7 @@ function onListPointerUp(): void {
 
 /** 键盘也能调顺序：Alt + 上/下 */
 function onRowKeydown(event: KeyboardEvent, id: string): void {
+  if (collabLocked.value) return;
   if (!event.altKey || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) return;
   event.preventDefault();
   nudgeLayerOrder(id, event.key === 'ArrowUp' ? 1 : -1);
@@ -188,103 +177,6 @@ function onNameInput(event: Event): void {
   updateLayer(target.id, { name: val }, false);
 }
 
-/* ------------------------------------------------------------------ *
- * 预设
- * ------------------------------------------------------------------ */
-
-const presetInput = ref<HTMLInputElement | null>(null);
-
-const presetRows = computed(() =>
-  editor.presets.map((preset) => {
-    const faces = preset.layers
-      .filter((l) => l.skin)
-      .slice(0, 3)
-      .map((l) => {
-        const s = l.skin as PresetSkin;
-        if (s.isCustomImage) {
-          return {
-            dataUrl: s.dataUrl,
-            bgSize: 'contain',
-            bgPos: 'center',
-            isCustom: true,
-          };
-        }
-        // 规格判定直接复用渲染那条路径：缩略图该切哪一块只由 describeSkin 说了算
-        const meta = describeSkin(s.width, s.height, s.frontOnly === true);
-        if (meta.frontOnly) {
-          return {
-            dataUrl: s.dataUrl,
-            bgSize: '200% 100%',
-            bgPos: '0% 0%',
-            isCustom: false,
-          };
-        }
-        return {
-          dataUrl: s.dataUrl,
-          bgSize: meta.legacy ? '800% 400%' : '800% 800%',
-          bgPos: meta.legacy ? '14.2857% 33.3333%' : '14.2857% 14.2857%',
-          isCustom: false,
-        };
-      });
-    return { ...preset, faces, extra: Math.max(0, preset.layers.length - faces.length) };
-  }),
-);
-
-const renamingId = ref<string | null>(null);
-const renameText = ref('');
-let renameInputEl: HTMLInputElement | null = null;
-
-function bindRenameInput(el: unknown): void {
-  renameInputEl = (el as HTMLInputElement | null) ?? null;
-}
-
-async function startRename(id: string, current: string): Promise<void> {
-  renamingId.value = id;
-  renameText.value = current;
-  await nextTick();
-  renameInputEl?.focus();
-  renameInputEl?.select();
-}
-
-function commitRename(): void {
-  if (renamingId.value) renamePreset(renamingId.value, renameText.value);
-  renamingId.value = null;
-}
-
-function cancelRename(): void {
-  renamingId.value = null;
-}
-
-const armedDeleteId = ref<string | null>(null);
-let armedTimer: ReturnType<typeof setTimeout> | null = null;
-
-function onDeleteClick(id: string): void {
-  if (armedTimer) clearTimeout(armedTimer);
-  if (armedDeleteId.value !== id) {
-    armedDeleteId.value = id;
-    armedTimer = setTimeout(() => {
-      armedDeleteId.value = null;
-    }, 3000);
-    return;
-  }
-  armedDeleteId.value = null;
-  removePreset(id);
-}
-
-onBeforeUnmount(() => {
-  if (armedTimer) clearTimeout(armedTimer);
-});
-
-function pickPresetFile(): void {
-  presetInput.value?.click();
-}
-
-async function onPresetFile(event: Event): Promise<void> {
-  const input = event.target as HTMLInputElement;
-  const file = input.files?.[0];
-  input.value = '';
-  if (file) await importPresets(file);
-}
 </script>
 
 <template>
@@ -312,6 +204,7 @@ async function onPresetFile(event: Event): Promise<void> {
           </span>
           <span class="preview__meta">
             <input
+              v-if="!collabLocked"
               :value="layer.name"
               class="bf-inp preview__name"
               type="text"
@@ -322,11 +215,12 @@ async function onPresetFile(event: Event): Promise<void> {
               @change="endChange"
               @blur="endChange"
             />
+            <strong v-else class="preview__name">{{ layer.name }}</strong>
             <span>{{ skinLabel }}</span>
           </span>
         </div>
 
-        <section class="bf-sblk bf-sblk--cyan bf-duo">
+        <section v-if="!collabLocked" class="bf-sblk bf-sblk--cyan bf-duo">
           <button
             type="button"
             class="bf-tg"
@@ -353,7 +247,7 @@ async function onPresetFile(event: Event): Promise<void> {
           </button>
         </section>
 
-        <section class="bf-sblk bf-sblk--gold">
+        <section v-if="!collabLocked" class="bf-sblk bf-sblk--gold">
           <div class="bf-sblk-t"><h3>变换</h3><span>方向键微调</span></div>
           <div v-for="spec in sliders" :key="spec.key" class="bf-sl">
             <div class="bf-sl-top">
@@ -391,7 +285,7 @@ async function onPresetFile(event: Event): Promise<void> {
           </div>
         </section>
 
-        <section class="bf-sblk bf-sblk--red">
+        <section v-if="!collabLocked" class="bf-sblk bf-sblk--red">
           <div class="bf-trio">
             <button class="bf-btn bf-btn--sm bf-btn--quiet" type="button" @click="centerSelected">居中</button>
             <button class="bf-btn bf-btn--sm bf-btn--quiet" type="button" @click="fitSelectedToDocument">铺满</button>
@@ -399,7 +293,7 @@ async function onPresetFile(event: Event): Promise<void> {
           </div>
         </section>
 
-        <section class="bf-sblk bf-sblk--red">
+        <section v-if="!collabLocked" class="bf-sblk bf-sblk--red">
           <div class="bf-duo">
             <button class="bf-btn bf-btn--sm bf-btn--quiet" type="button" @click="duplicateLayer(layer.id)">
               <i class="bf-ic bf-ic--copy" aria-hidden="true"><b /><b /></i>复制
@@ -414,8 +308,10 @@ async function onPresetFile(event: Event): Promise<void> {
       <template v-else>
         <div class="empty">
           <p class="empty__t">没有选中的图层</p>
-          <p class="bf-note">左边任选一张素材或皮肤即可放下，再点它就能选中。</p>
-          <div><button class="bf-btn bf-btn--sm bf-btn--ink" type="button" @click="addAvatar">新增头像</button></div>
+          <p class="bf-note">
+            {{ collabLocked ? '在画布上点选一个头像，然后在左侧换上你的皮肤。' : '左边任选一张素材或皮肤即可放下，再点它就能选中。' }}
+          </p>
+          <div v-if="!collabLocked"><button class="bf-btn bf-btn--sm bf-btn--ink" type="button" @click="addAvatar">新增头像</button></div>
         </div>
       </template>
 
@@ -425,7 +321,7 @@ async function onPresetFile(event: Event): Promise<void> {
           <h3>图层</h3>
           <span class="layers__head">
             <span>{{ editor.layers.length }} 个</span>
-            <button class="bf-btn bf-btn--sm bf-btn--quiet layers__add" type="button" @click="addAvatar">新增头像</button>
+            <button v-if="!collabLocked" class="bf-btn bf-btn--sm bf-btn--quiet layers__add" type="button" @click="addAvatar">新增头像</button>
           </span>
         </div>
         <ul
@@ -452,6 +348,7 @@ async function onPresetFile(event: Event): Promise<void> {
                 <span class="bf-lay-n">{{ item.name }}</span>
               </button>
               <button
+                v-if="!collabLocked"
                 type="button"
                 class="lay__vis"
                 :data-on="item.visible"
@@ -466,101 +363,13 @@ async function onPresetFile(event: Event): Promise<void> {
         </ul>
       </section>
 
-      <!-- 预设 -->
-      <section class="bf-sblk bf-sblk--grass">
-        <div class="bf-sblk-t">
-          <h3>预设</h3>
-          <span class="preset__acts">
-            <span v-if="editor.presets.length">{{ editor.presets.length }} 个</span>
-            <button
-              v-if="editor.presets.length"
-              class="bf-btn bf-btn--sm bf-btn--quiet"
-              type="button"
-              @click="exportPresets"
-            >
-              导出
-            </button>
-            <button class="bf-btn bf-btn--sm bf-btn--quiet" type="button" @click="pickPresetFile">导入</button>
-          </span>
-        </div>
-
-        <button
-          class="bf-btn bf-btn--sm preset__save"
-          type="button"
-          :disabled="!editor.layers.length"
-          :title="editor.layers.length ? '把这张图上的全部图层存成一个预设' : '画布上还没有图层'"
-          @click="saveCurrentAsPreset"
-        >
-          保存全部头像为预设
-        </button>
-        <input ref="presetInput" class="bf-sr-only" type="file" accept="application/json,.json" @change="onPresetFile" />
-
-        <ul v-if="editor.presets.length" class="rows">
-          <li v-for="preset in presetRows" :key="preset.id">
-            <div class="bf-lay">
-              <i class="bf-lay-bar" :style="{ background: ORIGIN_COLOR.preset }" aria-hidden="true" />
-              <button
-                v-if="renamingId !== preset.id"
-                type="button"
-                class="row__pick"
-                :title="'套用「' + preset.name + '」：替换画布上的 ' + preset.layers.length + ' 个头像，底图不动'"
-                @click="applyPreset(preset.id)"
-              >
-                <span class="preset__faces" aria-hidden="true">
-                  <span
-                    v-for="(face, index) in preset.faces"
-                    :key="index"
-                    class="bf-face preset-face"
-                    :class="{ 'preset-face--smooth': face.isCustom }"
-                    :style="{
-                      backgroundImage: 'url(' + face.dataUrl + ')',
-                      backgroundSize: face.bgSize,
-                      backgroundPosition: face.bgPos,
-                    }"
-                  />
-                  <span v-if="!preset.faces.length" class="bf-face preset-face preset-face--empty" />
-                  <span v-if="preset.extra" class="preset__extra">+{{ preset.extra }}</span>
-                </span>
-                <span class="bf-lay-n">{{ preset.name }}</span>
-              </button>
-              <input
-                v-else
-                :ref="bindRenameInput"
-                v-model="renameText"
-                class="preset__name-input"
-                type="text"
-                maxlength="40"
-                aria-label="预设名称"
-                @keydown.enter.prevent="commitRename"
-                @keydown.esc.prevent="cancelRename"
-                @blur="commitRename"
-              />
-              <button
-                class="bf-x bf-x--pen"
-                type="button"
-                title="重命名"
-                aria-label="重命名预设"
-                @click="startRename(preset.id, preset.name)"
-              >
-                <i class="bf-ic bf-ic--pen" aria-hidden="true" />
-              </button>
-              <button
-                class="bf-x"
-                :class="{ 'bf-x--armed': armedDeleteId === preset.id }"
-                type="button"
-                :title="armedDeleteId === preset.id ? '再点一次就删掉' : '删除预设'"
-                :aria-label="armedDeleteId === preset.id ? '确认删除预设' : '删除预设'"
-                @click="onDeleteClick(preset.id)"
-              >
-                <i class="bf-ic bf-ic--x" aria-hidden="true" />
-              </button>
-            </div>
-          </li>
-        </ul>
-        <p v-else class="bf-note">还没有预设。摆好头像，点上面的按钮存一组。</p>
-
-        <p class="bf-note preset__hint">
-          预设会保存在这台电脑的浏览器里，刷新不丢；换电脑或想备份，可以点上面的「导出」存成 .json 文件。
+      <!-- 协同编辑者：布局冻结，面板只剩「怎么换内容」的指引 -->
+      <section v-if="collabLocked" class="bf-sblk bf-sblk--cyan">
+        <div class="bf-sblk-t"><h3>协同编辑</h3></div>
+        <p class="bf-note">
+          布局已由发起者锁定：不能挪动、增删头像。点选画布上的一个头像，
+          然后在左侧素材里挑一张皮肤换上；改完点顶栏「完成」提交。
+          {{ dirtyCount > 0 ? '（' + dirtyCount + ' 个头像待提交）' : '' }}
         </p>
       </section>
     </div>
@@ -639,23 +448,6 @@ async function onPresetFile(event: Event): Promise<void> {
 .empty__t { font-size: var(--bf-font-size); font-weight: 700; }
 
 .rows { display: flex; flex-direction: column; gap: 6px; }
-.preset__acts { display: inline-flex; align-items: center; gap: 6px; }
-.preset__save { width: 100%; margin: 8px 0; }
-.preset__faces { display: inline-flex; align-items: center; gap: 2px; flex: none; }
-.preset-face { width: 20px; height: 20px; image-rendering: pixelated; background-repeat: no-repeat; }
-.preset-face--smooth { image-rendering: auto; }
-.preset__extra { font: 700 var(--bf-font-size-sm) / 1 var(--bf-mono); color: var(--bf-ink2); }
-.preset__name-input {
-  flex: 1 1 auto;
-  min-width: 0;
-  height: 24px;
-  padding: 0 6px;
-  font: 700 var(--bf-font-size-ui) / 1 var(--bf-mono);
-  color: var(--bf-ink);
-  background: var(--bf-white);
-  border: 1px solid var(--bf-ink);
-}
-.preset__hint { margin-top: 9px; }
 .row__pick { display: flex; align-items: center; gap: 9px; flex: 1 1 auto; min-width: 0; text-align: left; }
 
 .mobile-drawer-bar { display: none; }

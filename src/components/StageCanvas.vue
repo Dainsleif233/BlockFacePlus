@@ -3,6 +3,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import type { AvatarLayer, HandleName } from '../core/model/types';
 import { wheelRotation, wheelZoomFactor, zoomViewAt } from '../core/model/gesture';
+import { locked as collabLocked } from '../stores/collab';
 import {
   allHandlePositions,
   clampLayerToDocument,
@@ -353,7 +354,7 @@ function onPointerDown(event: PointerEvent): void {
   const hitRadius = (isTouch ? 18 : HANDLE_HIT) * px;
   const rotOffset = (isTouch ? 46 : ROTATE_OFFSET) * px;
 
-  if (layer) {
+  if (layer && !collabLocked.value) {
     const handle = hitTestHandle(layer, point.x, point.y, hitRadius, rotOffset);
     if (handle) {
       beginChange();
@@ -366,6 +367,13 @@ function onPointerDown(event: PointerEvent): void {
 
   const target = hitTopLayer(point);
   if (target) {
+    // 协同编辑者：点选只为换肤服务，位置动不了，直接不进拖动状态
+    if (collabLocked.value) {
+      selectLayer(target.id);
+      capturePointer(event);
+      event.preventDefault();
+      return;
+    }
     selectLayer(target.id);
     beginChange();
     drag = {
@@ -533,7 +541,7 @@ function onWheel(event: WheelEvent): void {
   const unit = event.deltaMode;
   const factor = wheelZoomFactor(delta, unit);
 
-  if (!event.ctrlKey && !event.metaKey) {
+  if (!event.ctrlKey && !event.metaKey && !collabLocked.value) {
     const target = hitTopLayer(toDocumentPoint(event));
     if (target) {
       event.preventDefault();
@@ -623,6 +631,11 @@ function onKeyDown(event: KeyboardEvent): void {
   }
 
   if (!layer) return;
+
+  if (collabLocked.value) {
+    // 协同编辑者：删不掉也挪不动，方向键只留 Escape 取消选中
+    return;
+  }
 
   if (event.key === 'Delete' || event.key === 'Backspace') {
     event.preventDefault();
@@ -748,11 +761,11 @@ defineExpose({ schedule });
         @pointerup.stop
         @pointercancel.stop
       >
-        <button class="m-act-btn" type="button" title="水平翻转" @click.stop="toggleFlip">
+        <button v-if="!collabLocked" class="m-act-btn" type="button" title="水平翻转" @click.stop="toggleFlip">
           <span>翻转</span>
         </button>
         <button
-          v-if="!isCustomSelected"
+          v-if="!isCustomSelected && !collabLocked"
           class="m-act-btn"
           :class="{ 'is-active': selected.overlay }"
           type="button"
@@ -762,16 +775,16 @@ defineExpose({ schedule });
           <i class="m-act-sq" :class="selected.overlay ? 'm-act-sq--grass' : ''" aria-hidden="true" />
           <span>帽子</span>
         </button>
-        <button class="m-act-btn" type="button" title="居中对齐" @click.stop="centerSelected">
+        <button v-if="!collabLocked" class="m-act-btn" type="button" title="居中对齐" @click.stop="centerSelected">
           <span>居中</span>
         </button>
-        <button class="m-act-btn" type="button" title="复制图层" @click.stop="duplicateSelected">
+        <button v-if="!collabLocked" class="m-act-btn" type="button" title="复制图层" @click.stop="duplicateSelected">
           <span>复制</span>
         </button>
         <button class="m-act-btn" type="button" title="打开属性面板" @click.stop="openInspector">
           <span>属性</span>
         </button>
-        <button class="m-act-btn m-act-btn--del" type="button" title="删除图层" @click.stop="deleteSelected">
+        <button v-if="!collabLocked" class="m-act-btn m-act-btn--del" type="button" title="删除图层" @click.stop="deleteSelected">
           <i class="bf-ic bf-ic--del" aria-hidden="true"><b /><b /></i>
           <span>删除</span>
         </button>

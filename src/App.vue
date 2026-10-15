@@ -2,11 +2,14 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import InspectorPanel from './components/InspectorPanel.vue';
+import PublishDialog from './components/PublishDialog.vue';
+import RoomGate from './components/RoomGate.vue';
 import SkinPanel from './components/SkinPanel.vue';
 import StageCanvas from './components/StageCanvas.vue';
 import StatusBar from './components/StatusBar.vue';
 import TopBar from './components/TopBar.vue';
 import { describeSkin } from './core/skin/texture';
+import { boot as bootCollab } from './stores/collab';
 import {
   canRedo,
   canUndo,
@@ -128,6 +131,8 @@ onMounted(() => {
   window.addEventListener('drop', onDrop);
   window.addEventListener('keydown', onKey);
   window.addEventListener('paste', onPaste);
+  // 先判定是否带 ?room= 进入协同模式，再谈别的
+  bootCollab();
 });
 
 onBeforeUnmount(() => {
@@ -168,6 +173,9 @@ onBeforeUnmount(() => {
     <div v-if="editor.notice" class="notice" :data-tone="editor.notice.tone" role="status">
       {{ editor.notice.message }}
     </div>
+
+    <RoomGate />
+    <PublishDialog />
   </div>
 </template>
 

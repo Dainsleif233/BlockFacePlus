@@ -2,6 +2,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
 import type { SkinOrigin } from '../core/skin/texture';
+import { locked as collabLocked } from '../stores/collab';
 import {
   BUILTIN_SKINS,
   editor,
@@ -160,7 +161,7 @@ async function onImageDrop(event: DragEvent): Promise<void> {
           :title="'一次填多个账号（空格、逗号或换行隔开）会各加一个头像，最多 ' + MAX_BATCH + ' 个'"
         >
           <h3>正版账号 ID</h3>
-          <span>多个各加一个</span>
+          <span>{{ collabLocked ? '换到选中的头像' : '多个各加一个' }}</span>
         </div>
         <form class="bf-row" @submit.prevent="submitAccount">
           <input
@@ -186,7 +187,7 @@ async function onImageDrop(event: DragEvent): Promise<void> {
       <section class="bf-sblk bf-sblk--cyan">
         <div class="bf-sblk-t" title="按住 Ctrl/Cmd 多选，或一次拖入多张，每张各加一个头像">
           <h3>上传皮肤</h3>
-          <span>可多选</span>
+          <span>{{ collabLocked ? '一次一张' : '可多选' }}</span>
         </div>
         <div
           class="bf-drop"
@@ -215,7 +216,7 @@ async function onImageDrop(event: DragEvent): Promise<void> {
           :title="'一次填多个地址（空格或换行隔开）会各加一个头像，最多 ' + MAX_BATCH + ' 个'"
         >
           <h3>网络地址</h3>
-          <span>多个各加一个</span>
+          <span>{{ collabLocked ? '换到选中的头像' : '多个各加一个' }}</span>
         </div>
         <form class="bf-row" @submit.prevent="submitUrl">
           <input
@@ -233,7 +234,7 @@ async function onImageDrop(event: DragEvent): Promise<void> {
       <section class="bf-sblk bf-sblk--cyan">
         <div class="bf-sblk-t" title="按住 Ctrl/Cmd 多选，或一次拖入多张，直接作为头像贴图使用，无需符合皮肤规格">
           <h3>上传头像图片</h3>
-          <span>可多选</span>
+          <span>{{ collabLocked ? '一次一张' : '可多选' }}</span>
         </div>
         <div
           class="bf-drop"
