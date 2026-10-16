@@ -129,17 +129,26 @@ export const collabApi = {
 /** 单次增量提交的体积上限（字符数）：云函数请求体上限 6MB，留出余量 */
 export const MAX_PATCH_CHARS = 4_000_000;
 
+/** 单次增量提交的条数上限：与后端 MAX_PATCH_UPDATES 对齐，超过直接 400 */
+export const MAX_PATCH_UPDATES = 64;
+
 /**
- * 把增量更新按体积切块：内嵌皮肤是 base64 data URI，一张高清自定义图可能几百 KB，
- * 一次塞几十条就会顶到请求体上限。块间顺序提交，单块失败不影响前面已落盘的。
+ * 把增量更新切块，两个上限取先到者：
+ *  - 体积：内嵌皮肤是 base64 data URI，一张高清自定义图可能几百 KB，顶到请求体上限就切；
+ *  - 条数：后端单次最多收 64 条，超过直接 400。
+ * 块间顺序提交，单块失败不影响前面已落盘的。
  */
-export function chunkUpdates(updates: AvatarUpdate[], maxChars = MAX_PATCH_CHARS): AvatarUpdate[][] {
+export function chunkUpdates(
+  updates: AvatarUpdate[],
+  maxChars = MAX_PATCH_CHARS,
+  maxCount = MAX_PATCH_UPDATES,
+): AvatarUpdate[][] {
   const chunks: AvatarUpdate[][] = [];
   let current: AvatarUpdate[] = [];
   let size = 2; // "[]" 本身
   for (const update of updates) {
     const itemSize = JSON.stringify(update).length + (current.length > 0 ? 1 : 0);
-    if (current.length > 0 && size + itemSize > maxChars) {
+    if (current.length > 0 && (current.length >= maxCount || size + itemSize > maxChars)) {
       chunks.push(current);
       current = [];
       size = 2;
