@@ -1,0 +1,106 @@
+# BlockFace+ · 应用入口（create_app + lifespan）
+# Copyright 2026 Dainsleif · Apache License 2.0
+#
+# uvicorn 入口就是这里的 app：`uv run uvicorn bfp.main:app --port 8088`。
+#
+# 为什么提供 create_app(settings)：测试要给每个用例一份独立的临时数据目录与独立数据库。
+# 如果配置是模块级全局常量，就只能靠改环境变量 + 重载模块，用例之间必然串味。
+# 配置是注入的不可变对象，app.state.settings 是唯一出口 —— 这条在测试里最值钱。
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+from . import avatars, base, rooms
+from .config import Settings
+from .db import Database
+from .errors import ApiError, error_response, json_response
+from .sweep import sweep_loop
+
+__all__ = ["app", "create_app"]
+
+log = logging.getLogger("bfp")
+
+# 允许的跨域方法：本应用只有这五种，多一种都是白送的面
+CORS_METHODS = ["GET", "POST", "PATCH", "DELETE", "OPTIONS"]
+CORS_HEADERS = ["X-BF-Room-Pwd", "Content-Type"]
+CORS_EXPOSE_HEADERS = ["X-BF-Base-Name"]
+
+
+def create_app(settings: Settings | None = None) -> FastAPI:
+    resolved = Settings.from_env() if settings is None else settings
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        resolved.data_dir.mkdir(parents=True, exist_ok=True)
+        resolved.base_dir.mkdir(parents=True, exist_ok=True)
+        db = Database(resolved.db_path)
+        await db.connect()
+        app.state.db = db
+        # 后台清扫：启动先扫一轮，之后按 BF_SWEEP_INTERVAL_SECONDS 轮询
+        sweeper = asyncio.create_task(sweep_loop(db, resolved), name="bfp-sweep")
+        try:
+            yield
+        finally:
+            # 关停时优雅取消：先 cancel 再 await，等它从 sleep / 事务里退出来再关连接，
+            # 否则可能出现"连接已关、清扫还在写"的报错刷屏
+            sweeper.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sweeper
+            await db.close()
+
+    app = FastAPI(
+        title="BlockFace+ 协同后端",
+        version=resolved.version,
+        lifespan=lifespan,
+    )
+    # 测试与路由处理器都从这里取配置/连接，别再引入第二处全局状态
+    app.state.settings = resolved
+
+    if "*" not in resolved.trusted_hosts:
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(resolved.trusted_hosts))
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(resolved.cors_origins),
+        # 本应用不用 cookie（密码走自定义请求头），所以永远不开 credentials：
+        # allow_origins=["*"] 与 allow_credentials=True 同时出现本身就是不合法的组合
+        allow_credentials=False,
+        allow_methods=CORS_METHODS,
+        allow_headers=CORS_HEADERS,
+        expose_headers=CORS_EXPOSE_HEADERS,
+    )
+
+    @app.exception_handler(ApiError)
+    async def _api_error(_request: Request, exc: ApiError) -> JSONResponse:
+        return error_response(exc.status, exc.message, exc.extra)
+
+    @app.exception_handler(Exception)
+    async def _unexpected(_request: Request, exc: Exception) -> JSONResponse:
+        log.exception("未处理的异常", exc_info=exc)
+        return error_response(500, "服务器开小差了，稍后再试")
+
+    @app.get("/api/health", tags=["meta"])
+    async def health() -> JSONResponse:
+        """探活：不碰数据库、不鉴权，反代和监控都打这个"""
+        return json_response({"ok": True, "version": resolved.version})
+
+    @app.get("/api/config", tags=["meta"])
+    async def config() -> JSONResponse:
+        """公开上限，供前端展示与运维自查；只回数值，不泄漏任何存储/路径信息"""
+        return json_response(resolved.public_config())
+
+    app.include_router(rooms.router)
+    app.include_router(avatars.router)
+    app.include_router(base.router)
+    return app
+
+
+app = create_app()

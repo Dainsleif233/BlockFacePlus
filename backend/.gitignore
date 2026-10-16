@@ -1,0 +1,10 @@
+# 本地数据：SQLite 库 + 底图字节，永远不进仓库（里面是真实房间内容与密码哈希）
+data/
+
+# uv / Python 运行产物
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/

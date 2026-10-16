@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "blockface-plus-backend"
+version = "0.2.0"
+description = "BlockFace+ 协同房间后端（FastAPI + SQLite + 本地底图字节）"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+authors = [{ name = "Dainsleif" }]
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "aiosqlite>=0.20",
+  "python-multipart>=0.0.9",
+  "pydantic>=2.7",
+]
+
+[project.scripts]
+bfp-ops = "bfp.ops:main"
+
+# 开发/测试用；生产用 `uv sync --frozen --no-dev` 就装不到这一组
+[dependency-groups]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.24",
+  "httpx>=0.27",
+  "anyio>=4.0",
+]
+
+[tool.hatch.build.targets.wheel]
+# src 布局：这里必须写 "src/bfp" 而不是 "bfp" —— packages 的每一项就是"相对项目根的路径"，
+# 写 "bfp" 时 hatchling 会去根目录找 bfp/（找不到），于是装出一个**空的** wheel：
+# bfp-ops 命令装上了，但一跑就 ModuleNotFoundError: No module named 'bfp'。
+# 写成 src/bfp 时 hatchling 会自动把 src 作为源码根剥掉，wheel 里的仍是顶层 bfp/。
+packages = ["src/bfp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# 刻意不设 pythonpath：测试必须导入"真正装进 venv 的那个包"，
+# 否则打包坏了（空 wheel）也能靠 src 目录把测试跑绿，uvicorn 却起不来。
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.uv]
+package = true
