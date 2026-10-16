@@ -25,7 +25,7 @@ import {
   type RoomPatch,
 } from '../core/collab/diff';
 import * as session from '../core/collab/session';
-import type { PatchItemResult, PatchPayload, RoomAvatarRecord, RoomInfo, RoomRole } from '../core/collab/types';
+import type { PatchItemResult, PatchPayload, RoomAvatarRecord, RoomBaseImage, RoomDoc, RoomInfo, RoomRole } from '../core/collab/types';
 import {
   collectRoomPayload,
   encodeLayerSkin,
@@ -253,25 +253,29 @@ export async function reloadRoom(): Promise<void> {
  * 提交
  * ------------------------------------------------------------------ */
 
-/** 底图超出服务端上限（10MB）时给出可直接照做的文案，null 表示没超 */
+/** 底图超出后端上限（BF_MAX_BASE_IMAGE_BYTES，128MB）时给出可直接照做的文案，null 表示没超 */
 function baseTooLarge(file: File): string | null {
   if (file.size <= MAX_BASE_IMAGE_BYTES) return null;
   return `底图 ${formatBytes(file.size)}，超过 ${MAX_BASE_IMAGE_BYTES / (1024 * 1024)}MB 上限，先压小再试`;
 }
 
 /**
- * 直传底图到预签名地址。
- * 存储端对超限体量或中途断掉的连接是直接掐断、不回响应，浏览器只能抛一句 TypeError，
- * 所以这里把网络层失败翻译成能照做的提示。
+ * 上传底图：建房时的首图与管理员换底图共用这一个入口，一次 multipart 请求搞定。
+ * 服务端的话（401/403/413…）原样上抛；剩下的失败只可能是断网，翻译成能照做的提示。
  */
-async function putBaseImage(url: string, file: File, type: string): Promise<void> {
-  let response: Response;
+async function sendBaseImage(
+  roomId: string,
+  password: string,
+  file: File,
+  baseImage: { name: string; type: string; width: number; height: number },
+): Promise<{ doc: RoomDoc; baseImage: RoomBaseImage }> {
   try {
-    response = await fetch(url, { method: 'PUT', body: file, headers: { 'Content-Type': type } });
-  } catch {
-    throw new Error(`底图上传中断（${formatBytes(file.size)}）：网络不稳或体量超过上传通道上限，压小后重试`);
+    const uploaded = await collabApi.uploadBase(roomId, password, file, baseImage);
+    return { doc: uploaded.doc, baseImage: uploaded.baseImage };
+  } catch (error) {
+    if (error instanceof CollabApiError) throw error;
+    throw new Error(`底图上传失败或中断（${formatBytes(file.size)}）：检查网络后重试`);
   }
-  if (!response.ok) throw new Error(`底图上传失败（${response.status}）`);
 }
 
 /**
@@ -340,31 +344,15 @@ export async function submitChanges(): Promise<void> {
   state.submitting = true;
   let swapped = false;
   try {
-    // 换底图：只有管理员，且走"直传 + 回执确认"这条路，只动 base.json 与图片字节
+    // 换底图：只有管理员，且只动底图那张表（画布尺寸随底图一起走）
     if (swapBase) {
       const payload = collectRoomPayload();
       if (!payload.baseImage || !payload.baseFile) throw new Error('房间缺少底图，无法提交');
       const tooLarge = baseTooLarge(payload.baseFile);
       if (tooLarge) { notify('error', tooLarge); return; }
-      const sign = await collabApi.signBaseUpload(state.roomId, password, payload.baseImage.type);
-      await putBaseImage(sign.upload.url, payload.baseFile, payload.baseImage.type);
-      const confirmed = await collabApi.confirmBase(state.roomId, password, {
-        key: sign.upload.key,
-        name: payload.baseImage.name,
-        type: payload.baseImage.type,
-        width: payload.baseImage.width,
-        height: payload.baseImage.height,
-      });
-      state.room = {
-        ...state.room,
-        doc: confirmed.doc,
-        baseImage: {
-          name: payload.baseImage.name,
-          type: payload.baseImage.type,
-          width: payload.baseImage.width,
-          height: payload.baseImage.height,
-        },
-      };
+      const uploaded = await sendBaseImage(state.roomId, password, payload.baseFile, payload.baseImage);
+      // 画布尺寸与文件名以服务端落盘的结果为准（它才是真正保存字节的那一方）
+      state.room = { ...state.room, doc: uploaded.doc, baseImage: uploaded.baseImage };
       baselineBaseId = editor.baseImageId;
       swapped = true;
     }
@@ -429,7 +417,7 @@ export interface PublishResult {
 }
 
 const publish = reactive<{
-  step: 'form' | 'creating' | 'uploading' | 'finalizing' | 'done';
+  step: 'form' | 'creating' | 'uploading' | 'done';
   error: string;
   result: PublishResult | null;
 }>({
@@ -491,16 +479,11 @@ export async function publishRoom(expiresDays: number): Promise<void> {
       layers: payload.layers,
       expiresDays,
     });
+    // 建房拿到的只是身份与密码，底图紧接着单独传一次；传完房间才从 draft 变 ready
     publish.step = 'uploading';
-    await putBaseImage(created.upload.url, payload.baseFile, payload.baseImage.type);
-
-    publish.step = 'finalizing';
-    await collabApi.confirmBase(created.roomId, created.editPassword, {
-      name: payload.baseImage.name,
-      type: payload.baseImage.type,
-      width: payload.baseImage.width,
-      height: payload.baseImage.height,
-    });
+    // 底图这一步失败就不再回滚房间：它还是 draft，后端会按 BF_DRAFT_TTL_SECONDS 收走，
+    // 用户重试一次是全新的房间，比删掉一个可能已经传了一半的房间干净
+    await sendBaseImage(created.roomId, created.editPassword, payload.baseFile, payload.baseImage);
 
     // 房主本人进房要拿管理员权限：会话里存管理员密码；编辑密码只展示给成员，不落会话
     session.saveRoomPassword(created.roomId, created.adminPassword);

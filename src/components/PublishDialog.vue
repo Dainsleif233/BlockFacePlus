@@ -3,7 +3,7 @@
   Copyright 2026 Dainsleif · Apache License 2.0
 
   把当前画布（底图 + 全部头像）发布成协同房间：
-  选过期时间 → 后端建房 → 底图直传 → 展示专属 URL 与两把密码（只显示这一次）。
+  选过期时间 → 后端建房 → 上传底图 → 展示专属 URL 与两把密码（只显示这一次）。
 -->
 <script setup lang="ts">
 import { computed, ref } from 'vue';
@@ -12,12 +12,11 @@ import { closePublish, collab, enterPublishedRoom, publishRoom, publishState as 
 
 const days = ref<number>(7);
 const copied = ref('');
-const busy = computed(() => publish.step === 'creating' || publish.step === 'uploading' || publish.step === 'finalizing');
+const busy = computed(() => publish.step === 'creating' || publish.step === 'uploading');
 
 const STEP_TEXT: Record<string, string> = {
   creating: '创建房间…',
   uploading: '上传底图…',
-  finalizing: '确认发布…',
 };
 
 function fmtDate(ts: number): string {

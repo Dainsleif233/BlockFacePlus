@@ -2,8 +2,9 @@
  * BlockFace+ · 协同房间 API 客户端
  * Copyright 2026 Dainsleif · Apache License 2.0
  *
- * 全部同源请求（前端与函数同站部署，无需 CORS）；密码走自定义头，不进 URL。
- * 底图字节走预签名 URL 直传 Blob，不经过本客户端。
+ * 后端是独立部署的 FastAPI（普通 VPS），前端产物留在边缘 Pages，
+ * 所以每个请求都要带上 VITE_API_BASE_URL 前缀；为空表示同源（本地开发经 Vite 代理）。
+ * 密码走自定义头，绝不进 URL；底图字节走 multipart 直接传到这里，没有预签名直传那一步。
  *
  * 改头像只有一条路：PATCH .../avatars 的差量提交（只带改动过的行与字段）。
  * 没有"整间房全量上传"这回事了 —— 也就没有因此而来的体积上限和预检。
@@ -15,6 +16,8 @@ import type {
   PatchItemResult,
   PatchPayload,
   PatchResult,
+  RoomBaseImage,
+  RoomDoc,
   RoomSnapshot,
 } from './types';
 
@@ -31,6 +34,12 @@ export class CollabApiError extends Error {
 }
 
 const PASSWORD_HEADER = 'X-BF-Room-Pwd';
+
+/**
+ * 后端地址前缀：由构建期变量注入，末尾多余的斜杠一律去掉（拼接时统一由这里补 '/'）。
+ * 空字符串 = 同源，请求打成实打实的 '/api/...'，交给 Vite 代理或反向代理。
+ */
+export const API_BASE: string = ((import.meta.env.VITE_API_BASE_URL as string | undefined) ?? '').replace(/\/+$/, '');
 
 async function parseError(response: Response): Promise<CollabApiError> {
   let message = `请求失败（${response.status}）`;
@@ -60,7 +69,7 @@ async function request<T>(
     throw new CollabApiError(413, oversizeMessage(serialized.length, options.maxChars));
   }
 
-  const response = await fetch(path, { method, headers, body: serialized });
+  const response = await fetch(API_BASE + path, { method, headers, body: serialized });
   if (!response.ok) throw await parseError(response);
   return (await response.json()) as T;
 }
@@ -87,29 +96,38 @@ export const collabApi = {
     return request('DELETE', `/api/rooms/${encodeURIComponent(roomId)}`, { password });
   },
 
-  /** 换底图前申请预签名上传 URL（仅管理员） */
-  signBaseUpload(roomId: string, password: string, type: string): Promise<{ upload: { url: string; key: string; expiresAt: number } }> {
-    return request('POST', `/api/rooms/${encodeURIComponent(roomId)}/base`, {
-      password,
-      body: { intent: 'sign', type },
-    });
-  },
-
-  /** 底图上传完成后的回执确认（画布尺寸一并更新，它就是底图尺寸） */
-  confirmBase(
+  /**
+   * 上传 / 更换底图：一次 multipart 请求搞定，画布尺寸随底图一起更新（它就是底图尺寸）。
+   * 这是"新建房间时的首图"与"管理员换底图"共用的唯一入口。
+   */
+  async uploadBase(
     roomId: string,
     password: string,
-    payload: { key?: string; name: string; type: string; width: number; height: number },
-  ): Promise<{ ok: boolean; doc: { width: number; height: number } }> {
-    return request('POST', `/api/rooms/${encodeURIComponent(roomId)}/base`, {
-      password,
-      body: { intent: 'confirm', ...payload },
+    file: Blob,
+    meta: { name: string; type: string; width: number; height: number },
+  ): Promise<{ ok: true; doc: RoomDoc; baseImage: RoomBaseImage }> {
+    const form = new FormData();
+    // Blob 本身没有名字与 MIME：文件名必须走 append 的第三个参数（否则一律写成 "blob"，
+    // 中文名和后缀都丢），MIME 缺失时用调用方给的 meta.type 补上。
+    const part = file.type ? file : new Blob([file], { type: meta.type });
+    form.append('file', part, meta.name);
+    form.append('name', meta.name);
+    form.append('width', String(meta.width));
+    form.append('height', String(meta.height));
+
+    const response = await fetch(`${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/base`, {
+      method: 'POST',
+      // 只带密码头：Content-Type 交给浏览器自己写，boundary 必须和 body 是一套
+      headers: { [PASSWORD_HEADER]: password },
+      body: form,
     });
+    if (!response.ok) throw await parseError(response);
+    return (await response.json()) as { ok: true; doc: RoomDoc; baseImage: RoomBaseImage };
   },
 
   /** 拉底图字节；调用方负责转成可用的图片对象 */
   async fetchBase(roomId: string, password: string): Promise<{ blob: Blob; name: string; type: string }> {
-    const response = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/base`, {
+    const response = await fetch(`${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/base`, {
       headers: { [PASSWORD_HEADER]: password },
     });
     if (!response.ok) throw await parseError(response);
@@ -129,13 +147,15 @@ export const collabApi = {
 
 /**
  * 单次请求的体积上限（字符数）。
- * 这是**传输**边界（云函数请求体上限 6MB，留出余量），不是"一次能改多少个头像"的限制：
+ * 上限来自后端的 BF_* 环境变量（BF_MAX_JSON_BODY_BYTES 等），这里取保守值留余量，
+ * 要改就和后端一起改（见 docs/collab-api.md 第 4 节）。
+ * 这是**传输**边界，不是"一次能改多少个头像"的限制：
  * 改得再多也只是自动切成几个请求，一条都不会丢。
  */
-export const MAX_PATCH_CHARS = 4_000_000;
+export const MAX_PATCH_CHARS = 64 * 1024 * 1024;
 
-/** 建房是真正的一次性全量（一间全新的房），请求体上限与后端 readJsonBody 默认值对齐 */
-export const MAX_CREATE_CHARS = 5 * 1024 * 1024;
+/** 建房是真正的一次性全量（一间全新的房）：与后端 BF_MAX_JSON_BODY_BYTES（256MiB）取齐 */
+export const MAX_CREATE_CHARS = 256 * 1024 * 1024;
 
 function oversizeMessage(chars: number, limit: number): string {
   return `这次要传的内容约 ${formatBytes(chars)}，超过单次请求的 ${formatBytes(limit)} 上限：把自定义图压小一点再试`;
@@ -156,13 +176,13 @@ export function fullSubmitTooLarge(payload: unknown, limit = MAX_CREATE_CHARS): 
 }
 
 /**
- * 底图体积上限：与后端 MAX_BASE_IMAGE_BYTES 对齐（10MB）。
- * 后端到 confirm 才校验，而上传通道本身另有更小的硬上限（实测 25MiB 处直接掐断连接、
- * 不回响应），所以前端必须在上传之前先拦下来，否则只会得到一句 Failed to fetch。
+ * 底图体积上限：与后端 BF_MAX_BASE_IMAGE_BYTES（128MiB）取齐。
+ * 上传前先拦下来，否则几 MB 的底图要等整段上传完才由服务端回一句 413，
+ * 大图上白白浪费一次完整的往返。
  */
-export const MAX_BASE_IMAGE_BYTES = 10 * 1024 * 1024;
+export const MAX_BASE_IMAGE_BYTES = 128 * 1024 * 1024;
 
-/** 把字节数说成人话，用于「底图 28.4MB，超过 10MB 上限」这类提示 */
+/** 把字节数说成人话，用于「底图 28.4MB，超过 128MB 上限」这类提示 */
 export function formatBytes(bytes: number): string {
   if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
   if (bytes >= 1024) return `${Math.round(bytes / 1024)}KB`;

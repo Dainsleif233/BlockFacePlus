@@ -70,16 +70,16 @@ export type RoomAvatarDraft = Omit<RoomAvatarRecord, 'skinUpdatedAt' | 'layoutUp
 export interface CreateRoomPayload {
   baseImage: { name: string; type: string; width: number; height: number };
   layers: RoomAvatarDraft[];
-  /** 过期天数，只认 3 / 7 / 14 */
+  /** 过期天数：UI 给 3/7/14/30/90，服务端另有 BF_MAX_EXPIRY_DAYS 兜底 */
   expiresDays: number;
 }
 
+/** 建房回执：只有身份与两把密码，没有上传地址 —— 底图随后由 uploadBase 直接传 */
 export interface CreateRoomResult {
   roomId: string;
   editPassword: string;
   adminPassword: string;
   expiresAt: number;
-  upload: { url: string; key: string; expiresAt: number };
 }
 
 /** 布局字段的局部补丁：只带真的变了的键，没带的键服务端一律不动 */
@@ -125,5 +125,5 @@ export interface PatchResult {
   results: PatchItemResult[];
 }
 
-export const EXPIRY_DAYS = [3, 7, 14] as const;
+export const EXPIRY_DAYS = [3, 7, 14, 30, 90] as const;
 export type ExpiryDays = (typeof EXPIRY_DAYS)[number];

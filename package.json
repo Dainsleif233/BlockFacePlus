@@ -15,12 +15,11 @@
     "test:watch": "vitest",
     "typecheck": "vue-tsc -b",
     "e2e": "node tools/run-e2e.mjs",
-    "dev:api": "edgeone makers dev -n blockface-plus",
-    "rooms": "node tools/rooms.mjs"
+    "dev:api": "uv run --directory backend uvicorn bfp.main:app --reload --port 8088",
+    "rooms": "uv run --directory backend bfp-ops"
   },
   "dependencies": {
-    "vue": "^3.5.42",
-    "@edgeone/pages-blob": "^0.0.14"
+    "vue": "^3.5.42"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",
