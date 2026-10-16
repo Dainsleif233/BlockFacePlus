@@ -133,6 +133,20 @@ export const MAX_PATCH_CHARS = 4_000_000;
 export const MAX_PATCH_UPDATES = 64;
 
 /**
+ * 底图体积上限：与后端 MAX_BASE_IMAGE_BYTES 对齐（10MB）。
+ * 后端到 confirm 才校验，而上传通道本身另有更小的硬上限（实测 25MiB 处直接掐断连接、
+ * 不回响应），所以前端必须在上传之前先拦下来，否则只会得到一句 Failed to fetch。
+ */
+export const MAX_BASE_IMAGE_BYTES = 10 * 1024 * 1024;
+
+/** 把字节数说成人话，用于「底图 28.4MB，超过 10MB 上限」这类提示 */
+export function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)}KB`;
+  return `${bytes}B`;
+}
+
+/**
  * 把增量更新切块，两个上限取先到者：
  *  - 体积：内嵌皮肤是 base64 data URI，一张高清自定义图可能几百 KB，顶到请求体上限就切；
  *  - 条数：后端单次最多收 64 条，超过直接 400。

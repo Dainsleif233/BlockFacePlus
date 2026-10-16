@@ -11,7 +11,7 @@
  */
 
 import { computed, reactive, shallowRef } from 'vue';
-import { CollabApiError, chunkUpdates, collabApi } from '../core/collab/api';
+import { CollabApiError, MAX_BASE_IMAGE_BYTES, chunkUpdates, collabApi, formatBytes } from '../core/collab/api';
 import * as session from '../core/collab/session';
 import type { AvatarUpdate, RoomInfo, RoomRole } from '../core/collab/types';
 import {
@@ -238,6 +238,27 @@ function collectEditorUpdates(): { updates: AvatarUpdate[]; skinIds: Map<string,
   return { updates, skinIds, error: null };
 }
 
+/** 底图超出服务端上限（10MB）时给出可直接照做的文案，null 表示没超 */
+function baseTooLarge(file: File): string | null {
+  if (file.size <= MAX_BASE_IMAGE_BYTES) return null;
+  return `底图 ${formatBytes(file.size)}，超过 ${MAX_BASE_IMAGE_BYTES / (1024 * 1024)}MB 上限，先压小再试`;
+}
+
+/**
+ * 直传底图到预签名地址。
+ * 存储端对超限体量或中途断掉的连接是直接掐断、不回响应，浏览器只能抛一句 TypeError，
+ * 所以这里把网络层失败翻译成能照做的提示。
+ */
+async function putBaseImage(url: string, file: File, type: string): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetch(url, { method: 'PUT', body: file, headers: { 'Content-Type': type } });
+  } catch {
+    throw new Error(`底图上传中断（${formatBytes(file.size)}）：网络不稳或体量超过上传通道上限，压小后重试`);
+  }
+  if (!response.ok) throw new Error(`底图上传失败（${response.status}）`);
+}
+
 /** 编辑者/管理员点"完成"：角色不同走不同通道 */
 export async function submitChanges(): Promise<void> {
   if (state.submitting || !state.room || !state.roomId) return;
@@ -310,13 +331,13 @@ export async function submitChanges(): Promise<void> {
     let revision = state.room.revision;
     if (editor.baseImageId !== baselineBaseId) {
       // 底图换过：先走预签名直传 + 回执确认；confirm 会推进 revision，图层同步要用新值
+      const tooLarge = baseTooLarge(payload.baseFile);
+      if (tooLarge) {
+        notify('error', tooLarge);
+        return;
+      }
       const sign = await collabApi.signBaseUpload(state.roomId, password, payload.baseImage.type);
-      const response = await fetch(sign.upload.url, {
-        method: 'PUT',
-        body: payload.baseFile,
-        headers: { 'Content-Type': payload.baseImage.type },
-      });
-      if (!response.ok) throw new Error(`底图上传失败（${response.status}）`);
+      await putBaseImage(sign.upload.url, payload.baseFile, payload.baseImage.type);
       const confirmed = await collabApi.confirmBase(state.roomId, password, {
         key: sign.upload.key,
         name: payload.baseImage.name,
@@ -431,6 +452,12 @@ export async function publishRoom(expiresDays: number): Promise<void> {
     return;
   }
 
+  const tooLarge = baseTooLarge(payload.baseFile);
+  if (tooLarge) {
+    publish.error = tooLarge;
+    return;
+  }
+
   publish.step = 'creating';
   try {
     const created = await collabApi.createRoom({
@@ -440,12 +467,7 @@ export async function publishRoom(expiresDays: number): Promise<void> {
       expiresDays,
     });
     publish.step = 'uploading';
-    const response = await fetch(created.upload.url, {
-      method: 'PUT',
-      body: payload.baseFile,
-      headers: { 'Content-Type': payload.baseImage.type },
-    });
-    if (!response.ok) throw new Error(`底图上传失败（${response.status}）`);
+    await putBaseImage(created.upload.url, payload.baseFile, payload.baseImage.type);
 
     publish.step = 'finalizing';
     await collabApi.confirmBase(created.roomId, created.editPassword, {
