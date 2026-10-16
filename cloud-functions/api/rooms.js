@@ -29,7 +29,7 @@ import {
   pickExpiryMs,
   readJsonBody,
   sweepExpiredRooms,
-} from '../lib.js';
+} from './lib.js';
 
 function isRecord(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value);

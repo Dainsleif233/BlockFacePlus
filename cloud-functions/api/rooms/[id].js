@@ -24,7 +24,7 @@ import {
   readJsonBody,
   requireRoom,
   roomPrefix,
-} from '../../lib.js';
+} from '../lib.js';
 
 function isRecord(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
