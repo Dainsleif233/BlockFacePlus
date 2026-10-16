@@ -15,7 +15,8 @@
     "test:watch": "vitest",
     "typecheck": "vue-tsc -b",
     "e2e": "node tools/run-e2e.mjs",
-    "dev:api": "edgeone makers dev -n blockface-plus"
+    "dev:api": "edgeone makers dev -n blockface-plus",
+    "rooms": "node tools/rooms.mjs"
   },
   "dependencies": {
     "vue": "^3.5.42",
