@@ -413,7 +413,8 @@ export async function publishRoom(expiresDays: number): Promise<void> {
       height: payload.baseImage.height,
     });
 
-    session.saveRoomPassword(created.roomId, created.editPassword);
+    // 房主本人进房要拿管理员权限：会话里存管理员密码；编辑密码只展示给成员，不落会话
+    session.saveRoomPassword(created.roomId, created.adminPassword);
     publish.result = {
       roomId: created.roomId,
       shareUrl: session.roomUrl(created.roomId),
