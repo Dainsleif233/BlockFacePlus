@@ -334,7 +334,7 @@ function onNameInput(event: Event): void {
           <li v-for="item in layerRows" :key="item.id" :data-layer-id="item.id">
             <div class="bf-lay" :aria-current="item.id === editor.selectedId" :data-dragging="drag?.id === item.id">
               <i class="bf-lay-bar" aria-hidden="true" />
-              <i class="lay__grip" aria-hidden="true" />
+              <i v-if="!collabLocked" class="lay__grip" aria-hidden="true" />
               <button
                 type="button"
                 class="lay__pick"

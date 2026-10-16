@@ -256,6 +256,9 @@ function renderOverlay(): void {
   ctx.strokeStyle = INK;
   ctx.stroke();
 
+  // 编辑者（布局冻结）只画选中框：没有可交互的旋钮和缩放手柄，别误导用户去拖
+  if (collabLocked.value) return;
+
   const base = allHandlePositions(layer, 0);
   const rotateHandle = allHandlePositions(layer, ROTATE_OFFSET * px).find((item) => item.name === 'rotate');
   const nw = base.find((item) => item.name === 'nw');
@@ -792,7 +795,8 @@ defineExpose({ schedule });
     </div>
 
     <div class="stage__foot">
-      <span class="bf-chip bf-chip--dark desktop-only">头像 拖动 · 滚轮缩放 · Shift+滚轮旋转</span>
+      <span v-if="!collabLocked" class="bf-chip bf-chip--dark desktop-only">头像 拖动 · 滚轮缩放 · Shift+滚轮旋转</span>
+      <span v-else class="bf-chip bf-chip--dark desktop-only">布局已锁定 · 左侧选皮肤给选中的头像换装</span>
       <span class="bf-chip bf-chip--dark desktop-only">画布 拖动平移 · 滚轮缩放 · 适应窗口复位</span>
       <span class="bf-chip bf-chip--dark mobile-only">单指拖动画布 · 双指缩放</span>
     </div>
