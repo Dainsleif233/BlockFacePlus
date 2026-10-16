@@ -2,10 +2,11 @@
  * BlockFace+ · 协同两阶段 e2e（编辑者 / 管理员）
  * Copyright 2026 Dainsleif · Apache License 2.0
  *
- * 由 tools/run-e2e.mjs 用 cdp.mjs 分别驱动，阶段由 URL 参数决定：
- *   - ?room=<id>&bfstage=editor&bfpwd=<编辑密码>&bfadmin=<管理员密码>
+ * 由 tools/run-e2e.mjs 用 cdp.mjs 分别驱动。阶段由查询参数 ?bfstage= 决定，
+ * 凭据由 run-e2e.mjs 写一段临时脚本、经 cdp.mjs 的 --pre-file 注入 sessionStorage：
+ *   - ?bfstage=editor + { roomId, password: 编辑密码, adminPassword }
  *       编辑者：布局冻结，只能换肤，差量提交 + 冲突回合
- *   - ?room=<id>&bfstage=admin&bfpwd=<管理员密码>
+ *   - ?bfstage=admin + { roomId, password: 管理员密码, adminPassword }
  *       管理员：挪位置 / 新增 / 换底图，删除房间
  *
  * 与旧版最大的不同：**不再有页内 mock 后端**，打的就是生产用的 FastAPI。
@@ -15,7 +16,9 @@
  * 冲突回合也不再靠 mock 开关，而是用管理员密码从另一个客户端真的改一行，
  * 让编辑者手里的版本戳过期 —— 这样验的是后端真实的并发检查。
  *
- * 密码通过 URL 查询参数带进页面（一次性房间、跑完即删），脚本读完立刻从地址栏抹掉。
+ * 密码**不走 URL**：契约第 1 节写着密码绝不进 URL / query / 日志，所以主路径是上面说的 sessionStorage
+ * 注入（见 run-e2e.mjs 的 writeCreds）。这里仍兼容手工调试时直接写 ?bfpwd=&bfadmin= 的写法；
+ * 走 URL 的那条路读完立刻把它从地址栏抹掉。
  */
 
 const results = [];
@@ -24,16 +27,27 @@ function check(name, pass, detail) {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** 凭据：主路径是 run-e2e.mjs 注入的 sessionStorage，URL 参数只作为手工调试的兜底。
+ *  不在这里删掉 sessionStorage —— 它待的是一次性 Chrome 配置目录，而删早了万一页面还重载一次就没了。 */
+function readInjectedCreds() {
+  try {
+    return JSON.parse(window.sessionStorage.getItem('bfp-e2e-creds') || '{}');
+  } catch {
+    return {};
+  }
+}
+
 const params = new URLSearchParams(window.location.search);
+const injected = readInjectedCreds();
 const stage = params.get('bfstage');
-const roomId = params.get('room') || '';
-const password = params.get('bfpwd') || '';
-const adminPassword = params.get('bfadmin') || (stage === 'admin' ? password : '');
+const roomId = injected.roomId || params.get('room') || '';
+const password = injected.password || params.get('bfpwd') || '';
+const adminPassword = injected.adminPassword || params.get('bfadmin') || (stage === 'admin' ? password : '');
 const isEditor = stage === 'editor';
-if (!roomId) throw new Error('缺少 ?room= 参数');
+if (!roomId) throw new Error('缺少房间号（run-e2e.mjs 会注入，手工调试可加 ?room=）');
 if (stage !== 'editor' && stage !== 'admin') throw new Error('未知阶段：' + stage);
-if (!password) throw new Error('缺少 ?bfpwd= 参数（发布阶段生成的房间密码）');
-if (!adminPassword) throw new Error('缺少 ?bfadmin= 参数（冲突回合要用管理员密码从另一个客户端改一行）');
+if (!password) throw new Error('缺少房间密码（run-e2e.mjs 会注入，手工调试可加 ?bfpwd=）');
+if (!adminPassword) throw new Error('缺少管理员密码（冲突回合要用它从另一个客户端改一行）');
 
 const e2e = await import('/tools/e2e-support.js');
 e2e.installFetchRecorder();
