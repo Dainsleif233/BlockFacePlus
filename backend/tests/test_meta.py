@@ -6,6 +6,7 @@ from __future__ import annotations
 import pytest
 
 from bfp import __main__ as entry
+from conftest import pwd
 
 DEFAULT_CONFIG = {
     "version": "0.2.0",
@@ -29,6 +30,25 @@ async def test_health_needs_no_auth(harness):
     assert response.json() == {"ok": True, "version": "0.2.0"}
     # JSON 接口一律不许浏览器猜类型
     assert response.headers["x-content-type-options"] == "nosniff"
+
+
+async def test_unknown_route_and_wrong_method_keep_the_error_shape(harness):
+    """契约第 1 节：所有错误响应都是 {"error": "<中文人话>"}。
+
+    回归用例：不注册处理器时这两条会走 FastAPI 默认的 {"detail": "Not Found"}，
+    而前端 parseError 只认 error 字段 —— 拿不到 detail 就只能显示「请求失败（404）」，
+    对着这句话既不知道错在哪，也搜不到任何东西。
+    """
+    missing = await harness.client.get("/api/nope")
+    assert missing.status_code == 404
+    assert set(missing.json()) == {"error"}
+    assert missing.json()["error"] == "接口不存在"
+
+    wrong_method = await harness.client.put("/api/rooms/abcdefghijkl", headers=pwd("x"))
+    assert wrong_method.status_code == 405
+    assert wrong_method.json()["error"] == "这个接口不支持该请求方法"
+    # 405 必须带上 Allow：不然排错的人会以为路由压根没注册
+    assert "GET" in wrong_method.headers["allow"]
 
 
 async def test_config_returns_relaxed_defaults(harness):

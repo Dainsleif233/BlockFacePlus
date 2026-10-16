@@ -15,8 +15,10 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import avatars, base, rooms
@@ -33,6 +35,17 @@ log = logging.getLogger("bfp")
 CORS_METHODS = ["GET", "POST", "PATCH", "DELETE", "OPTIONS"]
 CORS_HEADERS = ["X-BF-Room-Pwd", "Content-Type"]
 CORS_EXPOSE_HEADERS = ["X-BF-Base-Name"]
+
+# 非业务错误（路由不存在、方法不对…）也要维持契约第 1 节的错误形状。
+# 不注册处理器的话它们会走 FastAPI 的默认响应 {"detail": "Not Found"}，
+# 而前端 parseError 只认 error 字段：拿不到 detail，只能退化成「请求失败（404）」这种没法排错的文案。
+_HTTP_MESSAGES: dict[int, str] = {
+    400: "请求不合法",
+    404: "接口不存在",
+    405: "这个接口不支持该请求方法",
+    413: "请求体太大",
+    415: "不支持的请求内容类型",
+}
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -81,6 +94,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.exception_handler(ApiError)
     async def _api_error(_request: Request, exc: ApiError) -> JSONResponse:
         return error_response(exc.status, exc.message, exc.extra)
+
+    @app.exception_handler(StarletteHTTPException)
+    async def _http_error(_request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        message = _HTTP_MESSAGES.get(exc.status_code) or (
+            exc.detail if isinstance(exc.detail, str) and exc.detail else f"请求失败（{exc.status_code}）"
+        )
+        response = error_response(exc.status_code, message)
+        # 405 的 Allow、401 的 WWW-Authenticate 这类头必须原样带出去，否则排错时会以为路由根本没注册。
+        # Content-Length 例外：body 已经换了，长度交给 JSONResponse 自己算。
+        for key, value in (exc.headers or {}).items():
+            if key.lower() != "content-length":
+                response.headers[key] = value
+        return response
+
+    @app.exception_handler(RequestValidationError)
+    async def _invalid_params(_request: Request, _exc: RequestValidationError) -> JSONResponse:
+        # 契约的状态码表里没有 422：入参不合法统一是 400 + {"error": ...}
+        return error_response(400, "请求参数不合法")
 
     @app.exception_handler(Exception)
     async def _unexpected(_request: Request, exc: Exception) -> JSONResponse:

@@ -30,7 +30,7 @@ from starlette.datastructures import FormData, UploadFile
 # 一个声称 chunked、实际灌 10GB 的请求会先塞满系统临时目录。
 # 这里自己喂一个计数用的流，超限在**读取阶段**就抛 413，剩下的字节根本不读。
 # starlette 版本由 uv.lock 钉死，所以这个内部接口的形态是确定的。
-from starlette.formparsers import MultiPartParser
+from starlette.formparsers import MultiPartException, MultiPartParser
 
 from .errors import ApiError, json_response, password_of
 from .normalize import (
@@ -74,7 +74,15 @@ async def _read_form(request: Request, limit: int) -> FormData:
             yield chunk
 
     parser = MultiPartParser(request.headers, counted_stream(), max_files=1, max_fields=8)
-    return await parser.parse()
+    try:
+        return await parser.parse()
+    except MultiPartException as exc:
+        # 畸形表单（缺 boundary、字段或文件超量、part 头不合规…）必须是 400。
+        # 不接住的话它会一路冒到 main.py 的兜底处理器变成 500：客户端只看到「服务器开小差了」，
+        # 而这类错 100% 是请求本身有问题，不是服务端故障（实测过：无 boundary、9 个字段、2 个文件都是 500）。
+        # 保留解析器的原话是为了可行动 ——「Too many fields. Maximum number of fields is 8.」
+        # 比一句笼统的「请求不合法」更能告诉调用方该删哪个字段。
+        raise ApiError(400, f"请求体不是合法的 multipart 表单（{exc}）") from None
 
 
 def _format_mb(size: int) -> str:

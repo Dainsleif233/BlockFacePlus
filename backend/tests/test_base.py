@@ -36,6 +36,45 @@ def multipart_body(boundary: str, content: bytes, filename: str = "base.png", **
     return b"".join(chunks)
 
 
+async def test_malformed_multipart_is_400_not_500(harness):
+    """畸形 multipart 必须是 400，不能一路冒到兜底处理器变成 500。
+
+    回归用例：base.py 直接用 starlette 的 MultiPartParser（为了在读取阶段就计数、超限不落地），
+    它抛的 MultiPartException 以前没人接，于是「客户端发错了」被报成「服务器开小差了」，
+    调用方拿不到任何可行动的信息。下面三类都实测复现过 500。
+    """
+    room_id, edit, _admin = await harness.create_ok()
+    headers = pwd(edit)
+
+    # 1) 声明了 multipart 却没有 boundary
+    no_boundary = await harness.client.post(
+        f"/api/rooms/{room_id}/base",
+        headers={**headers, "Content-Type": "multipart/form-data"},
+        content=b"not-really-multipart",
+    )
+    assert no_boundary.status_code == 400, no_boundary.text
+    assert "multipart" in no_boundary.json()["error"]
+
+    # 2) 字段数超过 max_fields=8（第 9 个字段就把解析器顶掉）
+    too_many_fields = await harness.client.post(
+        f"/api/rooms/{room_id}/base",
+        headers=headers,
+        files=[(f"f{i}", (None, str(i))) for i in range(9)],
+    )
+    assert too_many_fields.status_code == 400, too_many_fields.text
+
+    # 3) 文件数超过 max_files=1
+    too_many_files = await harness.client.post(
+        f"/api/rooms/{room_id}/base",
+        headers=headers,
+        files=[
+            ("file", ("a.png", PNG_BYTES, "image/png")),
+            ("file2", ("b.png", PNG_BYTES, "image/png")),
+        ],
+    )
+    assert too_many_files.status_code == 400, too_many_files.text
+
+
 async def test_base_is_conflict_until_uploaded(harness):
     room_id, edit, _admin = await harness.create_ok()
     response = await harness.client.get(f"/api/rooms/{room_id}/base", headers=pwd(edit))
