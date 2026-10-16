@@ -78,13 +78,18 @@ def delete_room_files(settings: Settings, room_id: str) -> int:
 class StagedBaseImage:
     """边收边落的底图上传暂存器。
 
-    用法：
+    用法（三个方法都是同步的，调用方负责在需要时丢进线程池 —— 见 base.py 里的 commit）：
         staged = StagedBaseImage(settings, room_id)
-        await staged.write(chunk)     # 可以一直写，写超了由调用方抛 413
-        await staged.abort()          # 任何失败路径都必须调用（清掉半截文件）
-        path = await staged.commit(ext)  # 原子替换到最终路径，并清掉该房间其它后缀
+        staged.write(chunk)     # 可以一直写，写超了由调用方抛 413
+        staged.abort()          # 任何失败路径都必须调用（清掉半截文件）
+        staged.commit(ext)      # 原子替换到最终路径，并清掉该房间其它后缀
 
     为什么上传不是"先读进内存再判断"：底图上限 128MiB，先攒内存等于把限制装在内存耗尽之后。
+
+    为什么 write() 直接在事件循环里写句柄、而 commit() 却要 to_thread：
+    write 收到的分片是 64KiB（base.py 的 CHUNK_SIZE），落到带缓冲的文件对象上通常只是一次
+    缓冲区拷贝，偶尔一次写系统调用；每个分片都往线程池丢一次，线程切换的开销比这次写还大。
+    而 commit() 要做的是 fsync —— 那是真的会等磁盘的动作，必须让出事件循环。
     """
 
     def __init__(self, settings: Settings, room_id: str) -> None:

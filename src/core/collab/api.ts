@@ -146,15 +146,18 @@ export const collabApi = {
 };
 
 /**
- * 单次请求的体积上限（字符数）。
- * 上限来自后端的 BF_* 环境变量（BF_MAX_JSON_BODY_BYTES 等），这里取保守值留余量，
- * 要改就和后端一起改（见 docs/collab-api.md 第 4 节）。
+ * 单次请求的体积上限。单位是 JSON.stringify 出来的**字符串长度**（UTF-16 码元），不是字节数 ——
+ * 头像名里带中文时，实际发出的 UTF-8 字节会比这里数出来的多。所以这两层校验都只是「提前给个提示」，
+ * 真正的边界始终是服务端的 BF_MAX_JSON_BODY_BYTES（默认 256MiB，见 docs/collab-api.md 第 4 节），
+ * 服务端那份 413 的 {"error": ...} 会被 UI 原样显示出来。
+ *
+ * PATCH 取 64MiB 是有意比服务端上限（256MiB）保守：它决定的是分块粒度，不是能力上限。
  * 这是**传输**边界，不是"一次能改多少个头像"的限制：
  * 改得再多也只是自动切成几个请求，一条都不会丢。
  */
 export const MAX_PATCH_CHARS = 64 * 1024 * 1024;
 
-/** 建房是真正的一次性全量（一间全新的房）：与后端 BF_MAX_JSON_BODY_BYTES（256MiB）取齐 */
+/** 建房是真正的一次性全量（一间全新的房）：与后端 BF_MAX_JSON_BODY_BYTES 的默认值取齐，单位同上一段 */
 export const MAX_CREATE_CHARS = 256 * 1024 * 1024;
 
 function oversizeMessage(chars: number, limit: number): string {
