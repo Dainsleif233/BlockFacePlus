@@ -4,7 +4,7 @@
  * Copyright 2026 Dainsleif · Apache License 2.0
  *
  * 直接读写 Blob（绕过 HTTP 接口，因此不需要管理员密码），用途：
- *   - 快查：列出房间、状态、创建/过期时间、头像与底图数量；
+ *   - 快查：列出房间、状态（底图是否就绪）、创建/过期时间、画布尺寸、头像与底图数量；
  *   - 残留：找出「对象还在、索引或元信息已不在」的孤儿对象（过期清扫没扫到的、
  *           或早期版本留下的），这类数据没人能访问，只白占容量；
  *   - 清理：删掉指定房间、清掉已过期房间、清掉孤儿对象。
@@ -152,6 +152,7 @@ function fmtBytes(n) {
 /* ------------------------------ 存储操作 ------------------------------ */
 
 const metaKey = (id) => `rooms/${id}/meta.json`;
+const baseKey = (id) => `rooms/${id}/base.json`;
 const indexKey = (id) => `index/${id}.json`;
 const roomPrefix = (id) => `rooms/${id}/`;
 const throttleKey = (id) => `throttle/${id}.json`;
@@ -219,27 +220,29 @@ async function cmdLs() {
   const rows = [];
   for (const e of filtered) {
     const meta = await getJson(metaKey(e.roomId));
+    // 底图的指针与画布尺寸都在 base.json 里，meta.json 只存房间身份
+    const base = await getJson(baseKey(e.roomId));
     const stats = await roomStats(e.roomId, withSize);
     rows.push({
       roomId: e.roomId,
-      status: meta?.status ?? (meta ? '?' : '无元信息'),
+      status: base?.status ?? (base ? '?' : '无底图'),
       created: fmtTime(e.createdAt),
       expires: fmtTime(e.expiresAt),
       left: fmtLeft(e.expiresAt, now),
       expired: typeof e.expiresAt === 'number' && now > e.expiresAt,
-      revision: meta?.revision ?? '-',
+      canvas: base ? `${base.width}×${base.height}` : '-',
       avatars: stats.avatars,
       images: stats.images,
       objects: stats.objects,
       bytes: withSize ? fmtBytes(stats.bytes) : '-',
-      base: meta?.baseImage?.name ?? '-',
+      base: base?.name ?? '-',
     });
   }
   if (want('json')) { console.log(JSON.stringify(rows, null, 2)); return; }
   if (rows.length === 0) { console.log(want('expired') ? '没有已过期的房间。' : '索引里没有房间。'); return; }
   table(
-    ['房间号', '状态', '创建', '过期', '剩余', '版本', '头像', '底图', ...(withSize ? ['占用'] : []), '对象'],
-    rows.map((r) => [r.roomId, r.status, r.created, r.expires, r.left, r.revision, r.avatars, r.images, ...(withSize ? [r.bytes] : []), r.objects]),
+    ['房间号', '状态', '创建', '过期', '剩余', '画布', '头像', '底图', ...(withSize ? ['占用'] : []), '对象'],
+    rows.map((r) => [r.roomId, r.status, r.created, r.expires, r.left, r.canvas, r.avatars, r.images, ...(withSize ? [r.bytes] : []), r.objects]),
   );
   const expired = rows.filter((r) => r.expired).length;
   console.log(`\n共 ${rows.length} 个房间${expired ? `，其中 ${expired} 个已过期（可 gc）` : ''}。`);

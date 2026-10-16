@@ -4,16 +4,28 @@
  *
  * 三种入口，一套画布：
  *  - 离线（无 ?room=）：就是原来的 BlockFace，"共同编辑"把当前画布发布成房间；
- *  - 编辑者（URL + 编辑密码）：布局冻结，只能换头像内容，"完成"提交增量；
- *  - 管理员（URL + 管理员密码）：任意修改，"完成"全量同步，另可删除房间。
+ *  - 编辑者（URL + 编辑密码）：布局冻结，只能换头像内容；
+ *  - 管理员（URL + 管理员密码）：任意修改，另可删除房间。
+ *
+ * 提交一律是差量：拿进房时的基线和当前画布比，只把真的变了的行与字段发出去。
+ * 换底图、换头像内容、保存布局在服务端是三张互不相干的表，在前端也是三份互不相干的改动。
  *
  * 与 editor.ts 的耦合走钩子（setCollabHooks），避免模块循环依赖。
  */
 
 import { computed, reactive, shallowRef } from 'vue';
-import { CollabApiError, MAX_BASE_IMAGE_BYTES, chunkUpdates, collabApi, formatBytes, fullSubmitTooLarge } from '../core/collab/api';
+import { CollabApiError, MAX_BASE_IMAGE_BYTES, chunkBySize, collabApi, formatBytes, fullSubmitTooLarge, mergePatchResults } from '../core/collab/api';
+import {
+  advanceBaseline,
+  buildRoomPatch,
+  countPending,
+  patchIsEmpty,
+  type LayerBaseline,
+  type LayerState,
+  type RoomPatch,
+} from '../core/collab/diff';
 import * as session from '../core/collab/session';
-import type { AvatarUpdate, RoomInfo, RoomRole } from '../core/collab/types';
+import type { PatchItemResult, PatchPayload, RoomAvatarRecord, RoomInfo, RoomRole } from '../core/collab/types';
 import {
   collectRoomPayload,
   encodeLayerSkin,
@@ -52,24 +64,16 @@ const state = reactive<CollabState>({
 });
 
 /**
- * 载入时的基线：图层 id → 当时的 skinId；提交时对比找出"改过内容"的头像。
+ * 进房时的基线：一行头像在该时刻的字段快照 + 服务端给的两个版本戳。
+ * 提交时拿它和当前画布比出差量；提交成功后只把成功的那些行推进到新基线。
  * shallowRef 只在整表替换时触发：不在这张表上原地 set，要改一律替换出新 Map。
  */
-const baselineSkin = shallowRef(new Map<string, string>());
-/** 载入时每条头像的 updatedAt，提交时作为逐条冲突检查凭证 */
-const baselineStamp = new Map<string, number>();
+const baseline = shallowRef<Map<string, LayerBaseline>>(new Map());
 
 const locked = computed(() => state.mode === 'room' && state.role === 'editor');
 const isAdmin = computed(() => state.mode === 'room' && state.role === 'admin');
-/** 待提交数 = 当前 skinId 与基线不同的头像数：撤销回基线即时归零，不会残留过期徽章 */
-const dirtyCount = computed(() => {
-  let count = 0;
-  for (const layer of editor.layers) {
-    const baseline = baselineSkin.value.get(layer.id);
-    if (baseline !== undefined && baseline !== layer.skinId) count += 1;
-  }
-  return count;
-});
+/** 待提交数 = 相对基线动过的行数（换肤、挪位置、新增、删除各算一处），撤销回基线即时归零 */
+const dirtyCount = computed(() => countPending(baseline.value, layerStates()));
 
 const LAYOUT_LOCK_MESSAGE = '协同编辑下布局已锁定：位置与数量由发起者固定，只能换头像内容';
 
@@ -94,21 +98,52 @@ setCollabHooks({
 });
 
 /* ------------------------------------------------------------------ *
- * 进房 / 刷新
+ * 基线
  * ------------------------------------------------------------------ */
+
+/** 当前画布在协议里的样子；order 用数组下标（服务端写入时也按下标，两边同一口径） */
+function layerStates(): LayerState[] {
+  return editor.layers.map((layer, index) => ({
+    id: layer.id,
+    name: layer.name,
+    x: layer.x,
+    y: layer.y,
+    size: layer.size,
+    rotation: layer.rotation,
+    opacity: layer.opacity,
+    overlay: layer.overlay,
+    flipH: layer.flipH,
+    visible: layer.visible,
+    order: index,
+    skinId: layer.skinId,
+  }));
+}
 
 /** 载入时的底图 id：提交时对比判断管理员有没有换底图 */
 let baselineBaseId: string | null = null;
 
-function captureBaseline(): void {
-  baselineSkin.value = new Map(editor.layers.map((l) => [l.id, l.skinId]));
+function captureBaseline(records: RoomAvatarRecord[] = []): void {
+  const stamps = new Map(records.map((r) => [r.id, r]));
+  const next = new Map<string, LayerBaseline>();
+  for (const layerState of layerStates()) {
+    const record = stamps.get(layerState.id);
+    next.set(layerState.id, {
+      state: layerState,
+      skinUpdatedAt: record?.skinUpdatedAt ?? 0,
+      layoutUpdatedAt: record?.layoutUpdatedAt ?? 0,
+    });
+  }
+  baseline.value = next;
   baselineBaseId = editor.baseImageId;
-  baselineStamp.clear();
 }
 
 function currentPassword(): string {
   return state.roomId ? session.loadRoomPassword(state.roomId) ?? '' : '';
 }
+
+/* ------------------------------------------------------------------ *
+ * 进房 / 刷新
+ * ------------------------------------------------------------------ */
 
 async function enterRoom(password: string): Promise<void> {
   if (!state.roomId) return;
@@ -135,9 +170,8 @@ async function enterRoom(password: string): Promise<void> {
     } finally {
       state.busyLoading = false;
     }
-    // 先重置基线（会清空两张 Map），再把服务端时间戳填回去——顺序反了凭证就全没了
-    captureBaseline();
-    for (const record of snapshot.avatars) baselineStamp.set(record.id, record.updatedAt);
+    // 装载完画布才有 layerStates 可比：基线必须在 loadRoomDocument 之后建
+    captureBaseline(snapshot.avatars);
 
     session.saveRoomPassword(state.roomId, password);
     state.role = snapshot.role;
@@ -219,25 +253,6 @@ export async function reloadRoom(): Promise<void> {
  * 提交
  * ------------------------------------------------------------------ */
 
-/** 把编辑者改过的头像编码成增量提交；编码失败返回错误文案 */
-function collectEditorUpdates(): { updates: AvatarUpdate[]; skinIds: Map<string, string>; error: string | null } {
-  const changed = editor.layers.filter((l) => {
-    const baseline = baselineSkin.value.get(l.id);
-    return baseline !== undefined && baseline !== l.skinId;
-  });
-  if (changed.length === 0) return { updates: [], skinIds: new Map(), error: null };
-  const updates: AvatarUpdate[] = [];
-  const skinIds = new Map<string, string>();
-  for (const layer of changed) {
-    const skin = encodeLayerSkin(layer.id);
-    if (!skin) return { updates: [], skinIds: new Map(), error: `「${layer.name}」的皮肤无法编码（可能是跨域来源），换一张再提交` };
-    updates.push({ id: layer.id, skin, expectUpdatedAt: baselineStamp.get(layer.id) });
-    // 记下提交那一刻的 skinId：成功后基线拨到这个值，等待期间的新改动不会被旧基线吞掉
-    skinIds.set(layer.id, layer.skinId);
-  }
-  return { updates, skinIds, error: null };
-}
-
 /** 底图超出服务端上限（10MB）时给出可直接照做的文案，null 表示没超 */
 function baseTooLarge(file: File): string | null {
   if (file.size <= MAX_BASE_IMAGE_BYTES) return null;
@@ -259,7 +274,43 @@ async function putBaseImage(url: string, file: File, type: string): Promise<void
   if (!response.ok) throw new Error(`底图上传失败（${response.status}）`);
 }
 
-/** 编辑者/管理员点"完成"：角色不同走不同通道 */
+/**
+ * 把差量切成几个请求发出去。
+ * 只有体积边界：updates 与 adds 各自按体积分块，deletes 跟第一批走 —— 条数不设限，
+ * 改得多就多几个请求，一条都不会丢。
+ */
+async function sendPatch(password: string, patch: RoomPatch): Promise<PatchItemResult[]> {
+  const roomId = state.roomId;
+  if (!roomId) return [];
+  const batches: PatchPayload[] = [];
+  for (const chunk of chunkBySize(patch.updates)) batches.push({ updates: chunk });
+  for (const chunk of chunkBySize(patch.adds)) batches.push({ adds: chunk });
+  if (patch.deletes.length > 0) {
+    if (batches.length === 0) batches.push({});
+    batches[0].deletes = patch.deletes;
+  }
+  const collected = [];
+  for (const batch of batches) collected.push(await collabApi.patchAvatars(roomId, password, batch));
+  return mergePatchResults(collected);
+}
+
+/** 提交结果汇总成人话（swapped 表示这一次还换了底图） */
+function reportResults(results: PatchItemResult[], swapped = false): void {
+  const ok = results.filter((r) => r.ok).length;
+  const conflicts = results.filter((r) => r.error === 'conflict').length;
+  const missing = results.filter((r) => r.error === 'not-found').length;
+  const failed = results.filter((r) => !r.ok && r.error !== 'conflict' && r.error !== 'not-found').length;
+  const parts: string[] = [];
+  if (swapped) parts.push('底图已更换');
+  if (ok > 0) parts.push(`已保存 ${ok} 处改动`);
+  if (conflicts > 0) parts.push(`${conflicts} 处刚被别人改过，仍留着待提交`);
+  if (missing > 0) parts.push(`${missing} 个头像在服务器上已被删除，刷新后可对齐`);
+  if (failed > 0) parts.push(`${failed} 处提交失败`);
+  const tone = conflicts === 0 && failed === 0 && missing === 0 ? 'success' : 'warn';
+  notify(tone, parts.join('；') || '没有改动需要提交');
+}
+
+/** 编辑者/管理员点"完成"：都是差量提交，区别只在换底图那一步 */
 export async function submitChanges(): Promise<void> {
   if (state.submitting || !state.room || !state.roomId) return;
   const password = currentPassword();
@@ -267,81 +318,34 @@ export async function submitChanges(): Promise<void> {
     state.phase = 'gate';
     return;
   }
-
-  if (state.role === 'editor') {
-    const { updates, skinIds, error } = collectEditorUpdates();
-    if (error) {
-      notify('error', error);
-      return;
-    }
-    if (updates.length === 0) {
-      notify('info', '没有改动需要提交：点选一个头像，在左侧换上自己的皮肤');
-      return;
-    }
-    state.submitting = true;
-    try {
-      const chunks = chunkUpdates(updates);
-      const conflicts: string[] = [];
-      const failures: string[] = [];
-      let saved = 0;
-      for (const chunk of chunks) {
-        const result = await collabApi.patchAvatars(state.roomId, password, chunk);
-        for (const item of result.results) {
-          if (item.ok) {
-            saved += 1;
-            const submitted = skinIds.get(item.id);
-            if (submitted !== undefined) {
-              baselineSkin.value = new Map(baselineSkin.value).set(item.id, submitted);
-            }
-            if (item.updatedAt !== undefined) baselineStamp.set(item.id, item.updatedAt);
-          } else if (item.error === 'conflict') {
-            conflicts.push(item.id);
-          } else {
-            failures.push(item.id);
-          }
-        }
-      }
-      const parts: string[] = [];
-      if (saved > 0) parts.push(`已保存 ${saved} 个头像`);
-      if (conflicts.length > 0) parts.push(`${conflicts.length} 个头像刚被别人改过，请刷新后重试`);
-      if (failures.length > 0) parts.push(`${failures.length} 个头像提交失败`);
-      const tone = conflicts.length === 0 && failures.length === 0 ? 'success' : 'warn';
-      notify(tone, parts.join('；') || '提交完成');
-      // 冲突/失败的条目不用额外登记：基线没动，差分自然会继续把它们算作待提交
-    } catch (error) {
-      notify('error', error instanceof CollabApiError ? error.message : '提交失败，稍后再试');
-    } finally {
-      state.submitting = false;
-    }
+  if (!editor.layers.length) {
+    notify('warn', '画布上一个头像都没有，先摆一个再提交');
     return;
   }
 
-  // 管理员：全量同步（含位置、增删）
-  const payload = collectRoomPayload();
-  if (!payload.baseImage || !payload.baseFile) {
-    notify('error', '房间缺少底图，无法提交');
+  const patch = buildRoomPatch(baseline.value, layerStates(), (id) => encodeLayerSkin(id));
+  const patchEmpty = patchIsEmpty(patch);
+  // 只换了底图、头像一行没动：差量是空的，但底图那一步照样得做
+  const swapBase = state.role === 'admin' && editor.baseImageId !== baselineBaseId;
+  if (patchEmpty && !swapBase) {
+    notify('info', patch.failedSkins > 0
+      ? `有 ${patch.failedSkins} 个头像的皮肤无法编码（可能是跨域来源），换一张再提交`
+      : '没有改动需要提交');
     return;
   }
-  if (payload.failedSkins > 0) {
-    notify('error', `有 ${payload.failedSkins} 个头像的皮肤无法编码，请先换掉再提交`);
-    return;
+  if (patch.failedSkins > 0) {
+    notify('warn', `有 ${patch.failedSkins} 个头像的皮肤无法编码（可能是跨域来源），这次先跳过它们`);
   }
-  // 先量体积再动手：这一步之后紧接着就是换底图，别等底图传完了才发现图层整批发不过去
-  const oversize = fullSubmitTooLarge({ layers: payload.layers, ifRevision: state.room.revision });
-  if (oversize) {
-    notify('error', oversize);
-    return;
-  }
+
   state.submitting = true;
+  let swapped = false;
   try {
-    let revision = state.room.revision;
-    if (editor.baseImageId !== baselineBaseId) {
-      // 底图换过：先走预签名直传 + 回执确认；confirm 会推进 revision，图层同步要用新值
+    // 换底图：只有管理员，且走"直传 + 回执确认"这条路，只动 base.json 与图片字节
+    if (swapBase) {
+      const payload = collectRoomPayload();
+      if (!payload.baseImage || !payload.baseFile) throw new Error('房间缺少底图，无法提交');
       const tooLarge = baseTooLarge(payload.baseFile);
-      if (tooLarge) {
-        notify('error', tooLarge);
-        return;
-      }
+      if (tooLarge) { notify('error', tooLarge); return; }
       const sign = await collabApi.signBaseUpload(state.roomId, password, payload.baseImage.type);
       await putBaseImage(sign.upload.url, payload.baseFile, payload.baseImage.type);
       const confirmed = await collabApi.confirmBase(state.roomId, password, {
@@ -351,7 +355,6 @@ export async function submitChanges(): Promise<void> {
         width: payload.baseImage.width,
         height: payload.baseImage.height,
       });
-      revision = confirmed.revision;
       state.room = {
         ...state.room,
         doc: confirmed.doc,
@@ -361,21 +364,27 @@ export async function submitChanges(): Promise<void> {
           width: payload.baseImage.width,
           height: payload.baseImage.height,
         },
-        revision,
       };
       baselineBaseId = editor.baseImageId;
+      swapped = true;
     }
-    await collabApi.putLayers(state.roomId, password, payload.layers, revision);
-    state.room = { ...state.room, revision: (await collabApi.getRoom(state.roomId, password)).room.revision };
-    captureBaseline();
-    notify('success', `已同步 ${payload.layers.length} 个头像到房间`);
-  } catch (error) {
-    if (error instanceof CollabApiError && error.status === 409) {
-      notify('warn', '房间刚被别人改过，正在载入最新版本…');
-      await reloadRoom();
+
+    if (patchEmpty) {
+      notify('success', '底图已更换');
       return;
     }
-    notify('error', error instanceof CollabApiError ? error.message : '提交失败，稍后再试');
+    const results = await sendPatch(password, patch);
+    // 只把成功的行推进到新基线：冲突/失败的原样留着继续算待提交
+    const next = new Map(baseline.value);
+    advanceBaseline(next, layerStates(), patch, results);
+    baseline.value = next;
+    reportResults(results, swapped);
+  } catch (error) {
+    if (error instanceof CollabApiError && error.status === 413) {
+      notify('error', error.message);
+      return;
+    }
+    notify('error', error instanceof CollabApiError ? error.message : ((error as Error).message || '提交失败，稍后再试'));
   } finally {
     state.submitting = false;
   }
@@ -464,9 +473,8 @@ export async function publishRoom(expiresDays: number): Promise<void> {
     return;
   }
 
-  // 建房是"一次把整间房发过去"，没有分块能力：体积超了服务端只会回 413，这里提前说清楚
+  // 建房是唯一一次真的把整间房发过去（一间全新的房），体积超了服务端只会回 413，这里提前说清楚
   const oversize = fullSubmitTooLarge({
-    doc: payload.doc,
     baseImage: payload.baseImage,
     layers: payload.layers,
     expiresDays,
@@ -479,7 +487,6 @@ export async function publishRoom(expiresDays: number): Promise<void> {
   publish.step = 'creating';
   try {
     const created = await collabApi.createRoom({
-      doc: payload.doc,
       baseImage: payload.baseImage,
       layers: payload.layers,
       expiresDays,

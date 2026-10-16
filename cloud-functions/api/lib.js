@@ -3,11 +3,22 @@
  * Copyright 2026 Dainsleif · Apache License 2.0
  *
  * EdgeOne Makers 没有托管数据库，所有状态都存 Blob（@edgeone/pages-blob）。
- * 键位前缀就是"表名"：
- *   rooms/<roomId>/meta.json            房间元信息（含密码哈希，绝不外发）
- *   rooms/<roomId>/avatars/<id>.json    每个头像一条记录（一头像一键，天然免合并冲突）
- *   rooms/<roomId>/images/base*.png     底图字节
- *   index/<roomId>.json                 过期清扫用的轻量索引
+ * 键位就是"表"，**一张表只有一个主人**，谁都不许整份回写别人的表：
+ *
+ *   rooms/<roomId>/meta.json              房间身份：房间号/创建时间/过期时间/两个密码哈希
+ *                                         —— 建房时写一次，此后没有任何代码路径会再写它
+ *   rooms/<roomId>/base.json              底图指针 + 画布尺寸 + 房间状态（draft/ready）
+ *                                         —— 只有底图这两条路（sign / confirm）会写
+ *   rooms/<roomId>/avatars/<id>.json      一个头像一行：布局字段 + 皮肤字段 + 两个版本戳
+ *                                         —— 改布局只动布局字段，换皮肤只动皮肤字段
+ *   rooms/<roomId>/images/base.<ext>      底图字节
+ *   index/<roomId>.json                   过期清扫用索引
+ *   throttle/<roomId>.json                登录失败限流
+ *
+ * 为什么这么拆：早先三件事（换底图 / 换头像内容 / 保存布局）都往同一份 meta.json 里
+ * 整份回写，后写的那次必然带着自己开头读到的旧内容，把先写的那次的成果覆盖掉——
+ * 实测能造出"底图指针指向已被删除的文件、房间永久打不开"。现在三件事的键在物理上
+ * 不重叠，互相覆盖这件事从根上不可能发生。
  * 全部读写使用 strong 一致性：写完的下一次读必须能读到。
  */
 
@@ -16,14 +27,21 @@ import crypto from 'node:crypto';
 import { promisify } from 'node:util';
 
 export const STORE_NAME = 'blockface-plus';
-export const MAX_LAYERS = 128;
+/**
+ * 一间房最多多少行头像。
+ * 每行一个对象、一次房间加载要把它们全读出来，所以这里是个真的代价上限，
+ * 不是拿来恶心人的数量限制：512 行已经远超正常拼图的规模。
+ * 单次请求里能带多少条由请求体积决定（见 readJsonBody），不再按条数卡人。
+ */
+export const MAX_LAYERS = 512;
 export const MAX_SKIN_DATA_URL = 1_500_000;
+/** 头像名会跟着每次房间加载回给所有成员，留个宽裕的上限防止有人拿它灌字节 */
+export const MAX_AVATAR_NAME = 200;
 export const MAX_POSITION = 32768;
 export const MIN_LAYER_SIZE = 16;
 export const MAX_LAYER_SIZE = 4096;
 export const MAX_DOC_SIZE = 8192;
 export const MAX_BASE_IMAGE_BYTES = 10 * 1024 * 1024;
-export const MAX_PATCH_UPDATES = 64;
 /** 与前端 preset.ts 同一口径：白名单 data URI，防止 javascript: 之类的东西混进 <img src> */
 const SKIN_DATA_URL_RE = /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+\/=]*$/;
 const ROOM_ID_RE = /^[A-Za-z0-9_-]{6,64}$/;
@@ -78,12 +96,32 @@ function store() {
   return getStoreStrong();
 }
 
+/**
+ * 限量并发：房间可以有几百行头像，一次全丢给存储层会开几百条连接。
+ * 分批发、每批内部并发，够快也不失礼。
+ */
+export async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  for (let i = 0; i < items.length; i += limit) {
+    const slice = items.slice(i, i + limit);
+    const done = await Promise.all(slice.map((item, k) => fn(item, i + k)));
+    for (let k = 0; k < done.length; k += 1) out[i + k] = done[k];
+  }
+  return out;
+}
+
 export function roomPrefix(roomId) {
   return `rooms/${roomId}/`;
 }
 
+/** 房间身份表：只在建房时写 */
 export function metaKey(roomId) {
   return `rooms/${roomId}/meta.json`;
+}
+
+/** 底图表：底图指针 + 画布尺寸 + 房间状态 */
+export function baseKey(roomId) {
+  return `rooms/${roomId}/base.json`;
 }
 
 export function avatarKey(roomId, layerId) {
@@ -92,8 +130,8 @@ export function avatarKey(roomId, layerId) {
 
 /**
  * 底图对象键：同一间房、同一个后缀**只有一个键**。
- * 早先换底图用 base-<Date.now()>.<ext> 造新键，每次签名都是一个新对象：
- * 签了名传了不确认，库里就留一份永远没人引用的死文件，1GB 额度被这么吃掉。
+ * 换底图用 base-<Date.now()>.<ext> 造新键的话，每次签名都是一个新对象：
+ * 签了名传了不确认，库里就留一份永远没人引用的死文件。
  */
 export function baseImageKey(roomId, ext) {
   return `rooms/${roomId}/images/base.${ext}`;
@@ -105,8 +143,7 @@ export function indexKey(roomId) {
 
 /**
  * 把房间里除 keep 之外的底图对象全清掉。
- * 换过后缀的旧图、上传中断的残渣、早期版本留下的 base-<时间戳>，都没有 meta 引用，
- * 不主动收就只会一直占着额度。keep 传数组，调用方自己决定要留哪几份。
+ * keep 传数组，调用方自己决定要留哪几份（当前在用的那张永远要留着）。
  */
 export async function pruneBaseImages(roomId, keep) {
   const s = await store();
@@ -169,7 +206,6 @@ export function generateAdminPassword() {
 /** 异步版：scryptSync 会把整个事件循环堵住，一个 isolate 同时只能伺候一个请求 */
 const scrypt = promisify(crypto.scrypt);
 
-/** 落库格式没变（scrypt$盐$哈希），老房间的哈希照样能验 */
 export async function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
   const hash = (await scrypt(password, salt, 32)).toString('hex');
@@ -193,7 +229,7 @@ export async function verifyPassword(password, stored) {
  *  1. 按 IP 计数 → 同一个 NAT 后面的人一起被关，纯连坐；
  *  2. 计数放内存 → 这套运行时每次请求都是全新的模块状态，实测连发 15 次错密码
  *     一个 429 都没出，等于没写（生产是否复用 isolate 不由我们决定，不能赌）；
- *  3. 计数写进 meta → 又多一个整文档覆盖的写者，容易和底图/头像的写入互相抹。
+ *  3. 计数写进房间表 → 又多一个整文档覆盖的写者，容易和底图/头像的写入互相抹。
  * 所以：状态单独落一个键，按房间算，读一次看一眼锁，写只发生在失败时。
  * ------------------------------------------------------------------ */
 
@@ -232,7 +268,7 @@ async function noteAuthFailure(roomId, now) {
 /**
  * 校验密码并给出角色。
  * 长度先过一道：管理员 12 位、编辑 8 位 —— 长度对不上的那把根本不用去算 scrypt。
- * 长度存在 meta 里（老房间没有就按当前约定），以后要改长度也不会把老房间锁在门外。
+ * 长度存在房间身份表里（老房间没有就按当前约定）。
  */
 export async function checkPassword(meta, password) {
   if (typeof password !== 'string' || password.length === 0 || password.length > 128) return null;
@@ -257,6 +293,12 @@ function clampNumber(value, min, max, fallback) {
   return Math.min(max, Math.max(min, n));
 }
 
+/** 头像名：只剥控制字符（防换行/控制码混进 UI 与日志），长度给足不截断真实名字 */
+function cleanName(raw, fallback) {
+  const text = typeof raw === 'string' ? raw.replace(/[\u0000-\u001f\u007f]/g, '').trim() : '';
+  return (text || fallback).slice(0, MAX_AVATAR_NAME);
+}
+
 export function normalizeSkinRecord(raw) {
   const record = isRecord(raw) ? raw : null;
   if (!record) return null;
@@ -272,28 +314,58 @@ export function normalizeSkinRecord(raw) {
   return skin;
 }
 
-/** 把任意来源的一条头像记录收拾干净；收拾不出来返回 null */
+/**
+ * 布局字段的**局部**补丁：只认请求里真的带了的键。
+ * 缺的键一律不动 —— 这是"换皮肤不会碰到位置、挪位置不会碰到皮肤"的落点。
+ * 返回 null 表示整条不合法；返回空对象表示这条什么也不用改。
+ */
+export function normalizeLayoutPatch(raw) {
+  if (!isRecord(raw)) return null;
+  const patch = {};
+  if ('name' in raw) patch.name = cleanName(raw.name, '头像');
+  if ('x' in raw) patch.x = clampNumber(raw.x, -MAX_POSITION, MAX_POSITION, 0);
+  if ('y' in raw) patch.y = clampNumber(raw.y, -MAX_POSITION, MAX_POSITION, 0);
+  if ('size' in raw) patch.size = Math.round(clampNumber(raw.size, MIN_LAYER_SIZE, MAX_LAYER_SIZE, 256));
+  if ('rotation' in raw) patch.rotation = Math.round(clampNumber(raw.rotation, -3600, 3600, 0));
+  if ('opacity' in raw) patch.opacity = clampNumber(raw.opacity, 0, 1, 1);
+  if ('overlay' in raw) patch.overlay = raw.overlay !== false;
+  if ('flipH' in raw) patch.flipH = raw.flipH === true;
+  if ('visible' in raw) patch.visible = raw.visible !== false;
+  if ('order' in raw) patch.order = Math.max(0, Math.round(clampNumber(raw.order, 0, Number.MAX_SAFE_INTEGER, 0)));
+  return patch;
+}
+
+/** 整条头像记录（建房 / 新增一行时用）；收拾不出来返回 null */
 export function normalizeAvatarRecord(raw, index = 0) {
   if (!isRecord(raw)) return null;
   if (typeof raw.id !== 'string' || !LAYER_ID_RE.test(raw.id)) return null;
-  const rawName = typeof raw.name === 'string' ? raw.name.trim() : '';
-  const order = Math.max(0, Math.round(clampNumber(raw.order, 0, Number.MAX_SAFE_INTEGER, index)));
+  const layout = normalizeLayoutPatch(raw);
+  if (!layout) return null;
   const skin = raw.skin === null || raw.skin === undefined ? null : normalizeSkinRecord(raw.skin);
   if (raw.skin != null && !skin) return null;
   return {
     id: raw.id,
-    name: (rawName || '头像 ' + (index + 1)).slice(0, 40),
-    x: clampNumber(raw.x, -MAX_POSITION, MAX_POSITION, 0),
-    y: clampNumber(raw.y, -MAX_POSITION, MAX_POSITION, 0),
-    size: Math.round(clampNumber(raw.size, MIN_LAYER_SIZE, MAX_LAYER_SIZE, 256)),
-    rotation: Math.round(clampNumber(raw.rotation, -3600, 3600, 0)),
-    opacity: clampNumber(raw.opacity, 0, 1, 1),
-    overlay: raw.overlay !== false,
-    flipH: raw.flipH === true,
-    visible: raw.visible !== false,
-    order,
+    name: layout.name ?? `头像 ${index + 1}`,
+    x: layout.x ?? 0,
+    y: layout.y ?? 0,
+    size: layout.size ?? 256,
+    rotation: layout.rotation ?? 0,
+    opacity: layout.opacity ?? 1,
+    overlay: layout.overlay ?? true,
+    flipH: layout.flipH ?? false,
+    visible: layout.visible ?? true,
+    order: layout.order ?? index,
     skin,
   };
+}
+
+/**
+ * 底图名：会进 X-BF-Base-Name 响应头（响应头不允许非 ASCII，前端再 decodeURIComponent 解回来），
+ * 所以必须剥控制字符 + 留一个上限，别让人拿文件名把响应头灌爆。
+ */
+export function normalizeBaseName(raw) {
+  const text = typeof raw === 'string' ? raw.replace(/[\u0000-\u001f\u007f]/g, '').trim() : '';
+  return (text || '底图').slice(0, 80);
 }
 
 export function normalizeRoomId(raw) {
@@ -307,6 +379,11 @@ export function normalizeRoomId(raw) {
 export async function getRoomMeta(roomId) {
   const s = await store();
   return s.get(metaKey(roomId), { type: 'json' });
+}
+
+export async function getRoomBase(roomId) {
+  const s = await store();
+  return s.get(baseKey(roomId), { type: 'json' });
 }
 
 /** 过期房间就地删除，然后返回 410 语义 */
@@ -346,25 +423,31 @@ export async function sweepExpiredRooms(now = Date.now()) {
   return expired.length;
 }
 
-export function publicRoom(meta) {
+/**
+ * 房间对外的样子：身份来自 meta，画布尺寸与底图来自 base。
+ * 画布尺寸就是底图尺寸 —— 只有这一份真相，不需要也别再存第二份。
+ */
+export function publicRoom(meta, base) {
+  const ready = base?.status === 'ready' && !!base.key;
   return {
     roomId: meta.roomId,
-    doc: meta.doc,
-    baseImage: meta.baseImage ?? null,
+    doc: { width: base?.width ?? 0, height: base?.height ?? 0 },
+    baseImage: ready
+      ? { name: base.name ?? '底图', type: base.type ?? 'image/png', width: base.width, height: base.height }
+      : null,
     createdAt: meta.createdAt,
     expiresAt: meta.expiresAt,
-    revision: meta.revision ?? 0,
-    status: meta.status ?? 'ready',
+    status: ready ? 'ready' : 'draft',
   };
 }
 
 /**
- * 读取房间并做存在性 / 过期检查；不过关直接抛 ApiError。
+ * 读取房间身份并做存在性 / 过期检查；不过关直接抛 ApiError。
  *
  * 房间号是从 URL 里抠出来的、要直接拼进存储键，所以第一步先按生成时的字符集验一遍：
  * 放过 `../`、空字符这类东西，存储层会直接报错并落到调用方的兜底分支变成 500，
  * 而未鉴权就能反复触发（实测 GET /api/rooms/..%2FAAAAAA、/a%00b 都是 500）。
- * 校验放在这里，四个入口（读/全量写/删/头像/底图）全都自动覆盖。
+ * 校验放在这里，四个入口（读/改头像/删/底图）全都自动覆盖。
  */
 export async function requireRoom(roomId) {
   if (!normalizeRoomId(roomId)) throw new ApiError(404, '房间不存在或已被删除');
@@ -374,7 +457,8 @@ export async function requireRoom(roomId) {
     await deleteRoom(roomId).catch(() => {});
     throw new ApiError(410, '房间已过期');
   }
-  return meta;
+  const base = await getRoomBase(roomId);
+  return { roomId, meta, base };
 }
 
 /** 鉴权 + 限流；密码错一律 401，不区分"房间不存在"以外的细节 */

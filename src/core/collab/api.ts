@@ -4,12 +4,16 @@
  *
  * 全部同源请求（前端与函数同站部署，无需 CORS）；密码走自定义头，不进 URL。
  * 底图字节走预签名 URL 直传 Blob，不经过本客户端。
+ *
+ * 改头像只有一条路：PATCH .../avatars 的差量提交（只带改动过的行与字段）。
+ * 没有"整间房全量上传"这回事了 —— 也就没有因此而来的体积上限和预检。
  */
 
 import type {
-  AvatarUpdate,
   CreateRoomPayload,
   CreateRoomResult,
+  PatchItemResult,
+  PatchPayload,
   PatchResult,
   RoomSnapshot,
 } from './types';
@@ -52,44 +56,30 @@ async function request<T>(
   if (options.password) headers[PASSWORD_HEADER] = options.password;
   if (options.body !== undefined) headers['Content-Type'] = 'application/json';
   const serialized = options.body === undefined ? undefined : JSON.stringify(options.body);
-  // 体积预检：整间房一次性提交没有分块能力，超了服务端只会回 413，
-  // 与其让人对着「请求体太大」发愣，不如在这里先说人话
   if (serialized !== undefined && options.maxChars !== undefined && serialized.length > options.maxChars) {
     throw new CollabApiError(413, oversizeMessage(serialized.length, options.maxChars));
   }
 
-  const response = await fetch(path, {
-    method,
-    headers,
-    body: serialized,
-  });
+  const response = await fetch(path, { method, headers, body: serialized });
   if (!response.ok) throw await parseError(response);
   return (await response.json()) as T;
 }
 
 export const collabApi = {
   createRoom(payload: CreateRoomPayload): Promise<CreateRoomResult> {
-    return request('POST', '/api/rooms', { body: payload, maxChars: MAX_FULL_SUBMIT_CHARS });
+    return request('POST', '/api/rooms', { body: payload, maxChars: MAX_CREATE_CHARS });
   },
 
   getRoom(roomId: string, password: string): Promise<RoomSnapshot> {
     return request('GET', `/api/rooms/${encodeURIComponent(roomId)}`, { password });
   },
 
-  patchAvatars(roomId: string, password: string, updates: AvatarUpdate[]): Promise<PatchResult> {
-    return request('PATCH', `/api/rooms/${encodeURIComponent(roomId)}/avatars`, { password, body: { updates } });
-  },
-
-  putLayers(
-    roomId: string,
-    password: string,
-    layers: unknown[],
-    ifRevision?: number,
-  ): Promise<{ revision: number }> {
-    return request('PUT', `/api/rooms/${encodeURIComponent(roomId)}`, {
+  /** 差量提交：updates / adds / deletes 三个都可选，服务端只写被提到的那些行 */
+  patchAvatars(roomId: string, password: string, payload: PatchPayload): Promise<PatchResult> {
+    return request('PATCH', `/api/rooms/${encodeURIComponent(roomId)}/avatars`, {
       password,
-      body: { layers, ...(ifRevision === undefined ? {} : { ifRevision }) },
-      maxChars: MAX_FULL_SUBMIT_CHARS,
+      body: payload,
+      maxChars: MAX_PATCH_CHARS,
     });
   },
 
@@ -105,12 +95,12 @@ export const collabApi = {
     });
   },
 
-  /** 底图上传完成后的回执确认 */
+  /** 底图上传完成后的回执确认（画布尺寸一并更新，它就是底图尺寸） */
   confirmBase(
     roomId: string,
     password: string,
     payload: { key?: string; name: string; type: string; width: number; height: number },
-  ): Promise<{ ok: boolean; doc: { width: number; height: number }; revision: number }> {
+  ): Promise<{ ok: boolean; doc: { width: number; height: number } }> {
     return request('POST', `/api/rooms/${encodeURIComponent(roomId)}/base`, {
       password,
       body: { intent: 'confirm', ...payload },
@@ -137,25 +127,25 @@ export const collabApi = {
   },
 };
 
-/** 单次增量提交的体积上限（字符数）：云函数请求体上限 6MB，留出余量 */
+/**
+ * 单次请求的体积上限（字符数）。
+ * 这是**传输**边界（云函数请求体上限 6MB，留出余量），不是"一次能改多少个头像"的限制：
+ * 改得再多也只是自动切成几个请求，一条都不会丢。
+ */
 export const MAX_PATCH_CHARS = 4_000_000;
 
-/**
- * 整间房一次性提交的体积上限：与后端 readJsonBody 的默认值（5M 字符）对齐。
- * 建房和管理员全量同步都是"一次把整间房发过去"，没有分块能力，超了就是 413。
- */
-export const MAX_FULL_SUBMIT_CHARS = 5 * 1024 * 1024;
+/** 建房是真正的一次性全量（一间全新的房），请求体上限与后端 readJsonBody 默认值对齐 */
+export const MAX_CREATE_CHARS = 5 * 1024 * 1024;
 
 function oversizeMessage(chars: number, limit: number): string {
-  return `整间房的内容约 ${formatBytes(chars)}，超过单次提交的 ${formatBytes(limit)} 上限：减掉几张头像，或把自定义图压小再发布`;
+  return `这次要传的内容约 ${formatBytes(chars)}，超过单次请求的 ${formatBytes(limit)} 上限：把自定义图压小一点再试`;
 }
 
 /**
- * 整间房一次性提交的体积预检：超了返回一句人话，没问题返回 null。
- * 调用方两个地方：发布对话框点"发布"之前、管理员全量同步换底图之前 ——
- * 后者尤其要早查，否则底图已经换掉了才崩在图层那一步。
+ * 建房前的体积预检：超了返回一句人话，没问题返回 null。
+ * 只用在"发布"上 —— 那是唯一一次真的要把整间房发过去的操作。
  */
-export function fullSubmitTooLarge(payload: unknown, limit = MAX_FULL_SUBMIT_CHARS): string | null {
+export function fullSubmitTooLarge(payload: unknown, limit = MAX_CREATE_CHARS): string | null {
   let chars = 0;
   try {
     chars = JSON.stringify(payload)?.length ?? 0;
@@ -164,9 +154,6 @@ export function fullSubmitTooLarge(payload: unknown, limit = MAX_FULL_SUBMIT_CHA
   }
   return chars > limit ? oversizeMessage(chars, limit) : null;
 }
-
-/** 单次增量提交的条数上限：与后端 MAX_PATCH_UPDATES 对齐，超过直接 400 */
-export const MAX_PATCH_UPDATES = 64;
 
 /**
  * 底图体积上限：与后端 MAX_BASE_IMAGE_BYTES 对齐（10MB）。
@@ -183,29 +170,29 @@ export function formatBytes(bytes: number): string {
 }
 
 /**
- * 把增量更新切块，两个上限取先到者：
- *  - 体积：内嵌皮肤是 base64 data URI，一张高清自定义图可能几百 KB，顶到请求体上限就切；
- *  - 条数：后端单次最多收 64 条，超过直接 400。
- * 块间顺序提交，单块失败不影响前面已落盘的。
+ * 按体积把一批条目切成几个请求（内嵌皮肤是 base64，一张高清自定义图可能几百 KB）。
+ * 只按体积切，不按条数卡人：条数上限交给"一间房最多几行"这个真实边界。
+ * 单条就超限的也独立成块（会由服务端的 413 拒掉并给出人话提示），绝不悄悄丢掉。
  */
-export function chunkUpdates(
-  updates: AvatarUpdate[],
-  maxChars = MAX_PATCH_CHARS,
-  maxCount = MAX_PATCH_UPDATES,
-): AvatarUpdate[][] {
-  const chunks: AvatarUpdate[][] = [];
-  let current: AvatarUpdate[] = [];
+export function chunkBySize<T>(items: T[], maxChars = MAX_PATCH_CHARS): T[][] {
+  const chunks: T[][] = [];
+  let current: T[] = [];
   let size = 2; // "[]" 本身
-  for (const update of updates) {
-    const itemSize = JSON.stringify(update).length + (current.length > 0 ? 1 : 0);
-    if (current.length > 0 && (current.length >= maxCount || size + itemSize > maxChars)) {
+  for (const item of items) {
+    const itemSize = JSON.stringify(item).length + (current.length > 0 ? 1 : 0);
+    if (current.length > 0 && size + itemSize > maxChars) {
       chunks.push(current);
       current = [];
       size = 2;
     }
-    current.push(update);
+    current.push(item);
     size += itemSize;
   }
   if (current.length > 0) chunks.push(current);
   return chunks;
+}
+
+/** 把多批提交的结果合成一份，供上层统一回填基线与汇总提示 */
+export function mergePatchResults(all: PatchResult[]): PatchItemResult[] {
+  return all.flatMap((r) => r.results ?? []);
 }

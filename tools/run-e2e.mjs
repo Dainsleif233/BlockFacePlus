@@ -107,13 +107,21 @@ try {
 
   // B/C. 房间内两个角色（mock 两侧用同一组硬编码密码，URL 只带房间号与阶段）
   let all = [stageA];
+  // 阶段"抛异常/没有产出结果"必须算失败：不然一个炸掉的阶段会被 filter(Boolean) 悄悄吞掉，
+  // 剩下两个阶段全绿就报"通过"，等于白测。
+  let stageError = false;
   const publish = stageA.publish;
   if (!publish || !publish.roomId) {
     console.error('发布阶段没拿到房间凭据，编辑者/管理员阶段跳过');
+    stageError = true;
   } else {
     const roomUrl = base + '?room=' + encodeURIComponent(publish.roomId) + '&bfstage=';
     const stageB = await runStage('编辑者', roomUrl + 'editor', join(here, 'e2e-collab.js'));
     const stageC = await runStage('管理员', roomUrl + 'admin', join(here, 'e2e-collab.js'));
+    if (!stageB || !stageC) {
+      console.error('房间内阶段没跑出结果（算失败，不算跳过）');
+      stageError = true;
+    }
     all = [stageA, stageB, stageC].filter(Boolean);
   }
 
@@ -123,7 +131,7 @@ try {
   const skipped = results.filter((r) => r.skipped).length;
   console.log('\n通过 ' + (total - failed - skipped) + ' / 失败 ' + failed + ' / 跳过 ' + skipped
     + '（共 ' + total + ' 项）');
-  code = failed === 0 ? 0 : 1;
+  code = failed === 0 && !stageError ? 0 : 1;
 } finally {
   stop();
   // 给 taskkill 留一点时间落地，别让调用方一测完就又踩到残留进程

@@ -3,11 +3,14 @@
  * Copyright 2026 Dainsleif · Apache License 2.0
  *
  * POST /api/rooms
- * 入参：{ doc, baseImage: { name, type, width, height }, layers: [头像记录] }
+ * 入参：{ baseImage: { name, type, width, height }, layers: [头像记录], expiresDays }
  * 出参：{ roomId, editPassword, adminPassword, expiresAt, upload: { url, key } }
  *
  * 密码只在本响应里出现一次，之后不回传；底图走预签名 URL 由前端直传 Blob，
  * 字节不经过函数（云函数请求体上限 6MB，底图不该挤这条路）。
+ *
+ * 建房是唯一一次同时写三张表的时刻：房间身份、底图、每个头像一行。
+ * 之后这三张表各有各的主人，谁都不会再碰别人的。
  */
 
 import {
@@ -18,6 +21,7 @@ import {
   MAX_LAYERS,
   avatarKey,
   baseImageKey,
+  baseKey,
   errorResponse,
   extForContentType,
   generateAdminPassword,
@@ -27,8 +31,10 @@ import {
   hashPassword,
   indexKey,
   jsonResponse,
+  mapLimit,
   metaKey,
   normalizeAvatarRecord,
+  normalizeBaseName,
   pickExpiryMs,
   readJsonBody,
   sweepExpiredRooms,
@@ -73,37 +79,50 @@ export async function onRequestPost(context) {
     const roomId = generateRoomId();
     const now = Date.now();
     const expiresAt = now + ttlMs;
-    const baseKey = baseImageKey(roomId, ext);
+    const imageKey = baseImageKey(roomId, ext);
 
     const editPassword = generateEditPassword();
     const adminPassword = generateAdminPassword();
     const [editPasswordHash, adminPasswordHash] = await Promise.all([hashPassword(editPassword), hashPassword(adminPassword)]);
 
+    // 表一：房间身份。写完这一次，之后没有任何代码路径会再写它
     const meta = {
       roomId,
       createdAt: now,
       expiresAt,
-      doc: { width, height },
-      status: 'draft',
-      baseImage: null,
-      pendingBase: { key: baseKey, type: String(baseImage.type).toLowerCase(), bytes: 0 },
       editPasswordHash,
       adminPasswordHash,
-      // 记下密码长度：校验时长度对不上的一把不用去算 scrypt（见 lib.js checkPassword）
+      // 记下密码长度：校验时长度对不上的一把不用去算 scrypt（见 checkPassword）
       editPasswordLength: EDIT_PASSWORD_LENGTH,
       adminPasswordLength: ADMIN_PASSWORD_LENGTH,
-      revision: 0,
+    };
+
+    // 表二：底图。草稿期先记下待上传的键，确认（confirm）时才变 ready
+    const base = {
+      key: imageKey,
+      type: String(baseImage.type).toLowerCase(),
+      name: normalizeBaseName(baseImage.name),
+      width,
+      height,
+      status: 'draft',
+      pending: { key: imageKey, type: String(baseImage.type).toLowerCase() },
+      updatedAt: now,
     };
 
     const store = await getStoreStrong();
     await store.setJSON(metaKey(roomId), meta);
+    await store.setJSON(baseKey(roomId), base);
     await store.setJSON(indexKey(roomId), { roomId, createdAt: now, expiresAt });
-    // 一头像一键落盘：后续合并就是按 key 增删改，不存在整文档互相覆盖的问题
-    await Promise.all(layers.map((record) => store.setJSON(avatarKey(roomId, record.id), { ...record, updatedAt: now })));
+    // 表三：一个头像一行。行内布局与皮肤各有各的版本戳，改一个不会动另一个
+    await mapLimit(layers, 32, (record) => store.setJSON(avatarKey(roomId, record.id), {
+      ...record,
+      skinUpdatedAt: now,
+      layoutUpdatedAt: now,
+    }));
 
-    const { url, expiresAt: urlExpiresAt } = await store.createUploadUrl(baseKey, {
+    const { url, expiresAt: urlExpiresAt } = await store.createUploadUrl(imageKey, {
       expireSeconds: 3600,
-      contentType: meta.pendingBase.type,
+      contentType: base.type,
     });
 
     // 创建是最低频的入口，正好把过期房间顺手清一清（惰性过期的摊销清扫）
@@ -114,7 +133,7 @@ export async function onRequestPost(context) {
       editPassword,
       adminPassword,
       expiresAt,
-      upload: { url, key: baseKey, expiresAt: urlExpiresAt },
+      upload: { url, key: imageKey, expiresAt: urlExpiresAt },
     }, 201);
   } catch (error) {
     if (error instanceof ApiError) return errorResponse(error.status, error.message, error.extra);

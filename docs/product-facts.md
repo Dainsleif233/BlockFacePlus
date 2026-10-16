@@ -83,33 +83,42 @@ viewport.y = cursor.y - (cursor.y - viewport.y) * k + (document.height * (k - 1)
 ### 4.1 存储底座与键布局
 - 全部持久化走 `@edgeone/pages-blob` 的 `getStore({ name: 'blockface-plus', consistency: 'strong' })` 单例，不使用 KV；强一致保证「写完的下一次读必能读到」。
 - **一头像一键隔离**：每条头像是独立 Blob，改内容就是覆盖一个 key，天然免读-改-写竞争。
+- **三种操作三张表，互不相干**：换底图只写 `base.json` 与图片字节；换某条头像的内容只写那一行的皮肤字段；保存布局只写那一行的布局字段。谁都不必先读别人的表，更不可能把别人的写入覆盖掉——老版本「整房一份 meta 里同时塞底图指针、画布尺寸、状态与版本号」的结构已不存在（不留兼容层，老房间按未发布处理）。
 - 键布局：
-  - `rooms/<roomId>/meta.json`：房间元信息（画布尺寸、底图信息、状态 draft/ready、版本号 revision、过期时间、两把密码的哈希）；
-  - `rooms/<roomId>/avatars/<layerId>.json`：单条头像记录；
-  - `rooms/<roomId>/images/base-<时间戳>.<后缀>`：底图字节（预签名直传目标）；
-  - `index/<roomId>.json`：房间索引（过期清扫用，只存 roomId 与过期时间）。
-- 容量边界：云函数请求体 6MB、挂钟 120 秒；底图单张 ≤ 10MB；文档边长 ≤ 8192；头像 ≤ 128 个。
+  - `rooms/<roomId>/meta.json`：房间身份（房间号、创建/过期时间、两把密码的哈希），建房后只读；
+  - `rooms/<roomId>/base.json`：底图指针（key/类型/名字）、画布尺寸、状态 draft/ready、待确认的 pending 键；
+  - `rooms/<roomId>/avatars/<layerId>.json`：单条头像记录（布局字段 + 皮肤 + 两个版本戳）；
+  - `rooms/<roomId>/images/base.<后缀>`：底图字节（预签名直传目标；同后缀固定键，重传即覆盖）；
+  - `index/<roomId>.json`：房间索引（过期清扫用，只存 roomId 与过期时间）；
+  - `throttle/<roomId>.json`：密码试错计数（见 4.5）。
+- 容量边界：云函数请求体 6MB、挂钟 120 秒；底图单张 ≤ 10MB；文档边长 ≤ 8192；一间房最多 512 条头像（`MAX_LAYERS`）。
 
 ### 4.2 头像记录与内嵌皮肤格式
-- 单条头像记录（`RoomAvatarRecord`）：`id / name / x / y / size / rotation / opacity / overlay / flipH / visible / order / skin / updatedAt`。`order` 决定图层顺序（0 在最底层），`updatedAt` 是服务端生成的并发凭证。
+- 单条头像记录（`RoomAvatarRecord`）：`id / name / x / y / size / rotation / opacity / overlay / flipH / visible / order / skin / skinUpdatedAt / layoutUpdatedAt`。`order` 决定图层顺序（0 在最底层）；两个版本戳都是服务端生成的并发凭证，**各管各的域**：换皮肤只比对 `skinUpdatedAt`，挪位置只比对 `layoutUpdatedAt`。
 - 皮肤沿用 `PresetSkin`：`dataUrl / width / height / isCustomImage? / frontOnly?`。写入端 `createPresetSkin` 与读取端归一化配对，data URI 只认 png / jpeg / webp 白名单（防 `javascript:` 注入）。
 - **正脸双层标记（`frontOnly`）**：16×8 / 32×16 靠尺寸即可自证，但高清皮肤提取出的 64×32 / 128×64 与旧版整肤**同尺寸**，必须随材质携带该标记，否则会被误判成旧版皮肤、从错误区域裁切。
 - MC 皮肤入库前只保留正脸双层（底层正脸 8×8 + 帽子外层 8×8 并排，16×8 或高清等比），通用头像图片等比限制在 512px 内，控制单条记录体积。
 
 ### 4.3 提交协议（谁能改什么）
-- **编辑者（`PATCH /api/rooms/:id/avatars`）**：请求体只含 `{ id, skin, expectUpdatedAt }`——服务端字段白名单硬剥离，即便伪造请求也带不进位置/尺寸等布局字段；位置与布局一律取库中真值。`expectUpdatedAt` 逐条比对，版本不符该条返回 conflict 让客户端重载。单次 ≤ 64 条（`MAX_PATCH_UPDATES`）且 ≤ 4MB 字符（`MAX_PATCH_CHARS`），前端 `chunkUpdates` 按「体积 × 条数」双上限切块顺序提交，单块失败不影响已落盘的前块。
-- **管理员（`PUT /api/rooms/:id`）**：整房头像数组全量落盘，`ifRevision` 必填乐观锁——版本不符回 409（附最新 revision）触发客户端重载；内容没变的头像跳过写盘、不动 `updatedAt`，不搅乱别人的并发检查。
-- **删除（`DELETE /api/rooms/:id`）**：仅管理员，物理清扫房间前缀下全部 Blob 与索引。
+- **差量提交（`PATCH /api/rooms/:id/avatars`，写头像的唯一入口）**：请求体是 `{ updates, adds, deletes }` 三件套，服务端只写被提到的行、只写被带上的字段：
+  - `updates: [{ id, layout?, skin?, expectLayoutUpdatedAt?, expectSkinUpdatedAt? }]`：`layout` 是布局字段的局部补丁（没带的键一律不动），`skin` 是整份皮肤记录；两个凭证只在**自己对应的域被写入时**才比对，不符的那一条单独返回 `{ ok: false, error: 'conflict' }`；
+  - `adds: [整行记录]`：id 已被占用回 `exists`，绝不覆盖别人的行；
+  - `deletes: [id]`：幂等，不比对版本戳。
+  - 逐条返回 `{ results: [{ id, ok, error?, skinUpdatedAt?, layoutUpdatedAt? }] }`：某一条失败不影响同批其它条目；成功条目回带新版本戳，客户端只把成功的那些行推进基线，失败的原样留在「待提交」里。
+  - 角色：编辑者只能带 `skin`（带了 `layout` 也照样不写入，不报错），`adds`/`deletes` 一律 403；管理员三者皆可。
+  - 边界只有体积：单次请求体 ≤ 4MB 字符（`MAX_PATCH_CHARS`，前端 `chunkBySize` 按体积切块、**条数不设限**），一次能提到的行数不超过「一间房最多 512 行」这个真实上限。
+- **全量覆盖（`PUT /api/rooms/:id`）已拆除**：回 405 并指路 `PATCH .../avatars`；`ifRevision` 乐观锁、房间级 `revision`、`MAX_PATCH_UPDATES` 一并消失。
+- **删除（`DELETE /api/rooms/:id`）**：仅管理员，物理清扫房间前缀下全部 Blob（含底图、头像行、throttle）与索引条目。
 
 ### 4.4 底图直传与回执
-- 建房响应携带预签名 PUT URL（有效期 600 秒），客户端把底图字节**直传 Blob 存储绕过云函数**（规避 6MB 请求体上限）；随后回执 `confirm` 校验体积 ≤ 10MB，把房间从 draft 切到 ready 并推进 revision。
-- 管理员换底图同链路：`sign` 申请新键 → 直传 → `confirm`（带 key）。confirm 手里只有 key 的后缀，用「后缀 → MIME」反查表还原类型；成功后顺手删除旧底图文件，不让旧图占用存储额度。
+- 建房响应携带预签名 PUT URL（有效期 600 秒），客户端把底图字节**直传 Blob 存储绕过云函数**（规避 6MB 请求体上限）；随后回执 `confirm` 校验体积（HEAD 拿不到对象就直接 409，绝不把房间推成「发布成功但底图 404」）≤ 10MB，把房间从 draft 切成 ready——**只写 `base.json`，不碰任何一行头像**。
+- 管理员换底图同链路：`sign` 申请固定键 `images/base.<后缀>` → 直传 → `confirm`（带 key）。confirm 手里只有 key 的后缀，用「后缀 → MIME」反查表还原类型；确认后清掉同前缀下不再被引用的底图，不让旧图白占额度。
 - 读取（`GET /api/rooms/:id/base`）：按密码鉴权，返回 `Content-Type`、`Cache-Control: private, max-age=60` 与 `X-BF-Base-Name`——响应头不允许非 ASCII，底图文件名以 percent-encoding 下发，前端 `decodeURIComponent` 解回原名（解不动回退「底图」）。
 
 ### 4.5 密码与鉴权
 - 编辑密码 8 位、管理员密码 12 位；字符表剔除 `0/1/l/o` 等易混字符，并做拒绝采样保证均匀分布。
 - 落库只存 `scrypt$salt$hash`，校验用 `timingSafeEqual` 防时序侧信道；密码仅在创建响应里出现一次，之后任何接口都不回传。
-- 请求密码统一走 `X-BF-Room-Pwd` 请求头；失败鉴权按 IP 限流（5 分钟窗口 10 次失败，内存态，冷启动清零）。
+- 请求密码统一走 `X-BF-Room-Pwd` 请求头；密码试错按**房间**计数（60 秒窗口 10 次失败，计数落 `throttle/<roomId>.json`，冷启动不清零），超限回 429 并带上剩余秒数。已知代价：知道房间号的人可以故意把房主挡在门外 60 秒，换来的是多实例部署下不会各算各的。
 - 前端会话：密码只存 sessionStorage（`blockface-plus.room.<房间号>`），刷新不丢、关标签页即清空；发布成功后暂存的是管理员密码，房主进房即持管理权限。
 
 ### 4.6 生命周期与过期
@@ -121,7 +130,7 @@ viewport.y = cursor.y - (cursor.y - viewport.y) * k + (document.height * (k - 1)
 
 ## 5. 测试与工程质量保证
 
-- **单元测试 (Vitest)**：9 个测试套件、111 个单测用例，全面覆盖：
+- **单元测试 (Vitest)**：10 个测试套件、135 个单测用例，全面覆盖：
   - 几何变换与手势数学 (`transform.spec.ts`, `gesture.spec.ts`)
   - 皮肤 UV 贴图与规格解析 (`texture.spec.ts`)
   - 皮肤数据格式与头像记录归一化、内嵌材质安全防注入 (`preset.spec.ts`)
@@ -129,9 +138,10 @@ viewport.y = cursor.y - (cursor.y - viewport.y) * k + (document.height * (k - 1)
   - 合成导出与像素对齐 (`compose.spec.ts`)
   - 多数据源回退与超时控制 (`providers.spec.ts`)
   - 素材管理与撤销/重做历史引用保护 (`editor.spec.ts`)
-  - 协同增量切块（体积 × 条数双上限）(`collab/api.spec.ts`)
-- **端到端测试 (CDP-driven)**：Node.js 原生 DevTools Protocol 驱动真实 Chrome，三阶段（发布 → 编辑者 → 管理员）共 134 项检查：
+  - 协同差量切块与请求层体积边界 (`collab/api.spec.ts`)
+  - 差量计算：只发变了的行与字段、两个版本戳分域、失败的条目保留待提交 (`collab/diff.spec.ts`)
+- **端到端测试 (CDP-driven)**：Node.js 原生 DevTools Protocol 驱动真实 Chrome，三阶段（发布 → 编辑者 → 管理员）共 145 项检查（任一阶段抛异常即判失败，不会被"跳过"吞掉）：
   - **发布阶段**：无底图拦截、过期天数随请求走、底图字节预签名直传、confirm 用编辑密码切 ready、创建请求快照字段白名单；
-  - **编辑者阶段**：布局锁四路拦截、PATCH 只带 `{id, skin, expectUpdatedAt}`（协议不变性）、服务端位置原封未动、冲突回合保留待提交；
-  - **管理员阶段**：PUT 带 `ifRevision` 全量落盘、房间内换底图（直传字节绕过函数 + confirm 推进 revision）、删除房间后停留 gone 界面。
+  - **编辑者阶段**：布局锁四路拦截、PATCH 只带 `{id, skin, expectSkinUpdatedAt}`（协议不变性）、服务端位置原封未动、**皮肤戳前进而布局戳一动不动**、冲突只影响那一条并保留待提交、全量 PUT 一次都没被调用；
+  - **管理员阶段**：只有改动过的那一行进 PATCH、布局差量只带变了的字段（x/y）、新增走 `adds` 而非重发整间房、换底图不碰任何一行头像、删除房间后停留 gone 界面。
   - 页内 mock 后端（`src/dev/collabMock.ts`）由 e2e 动态 import，生产构建被 tree-shake，不产生死体积。

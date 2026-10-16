@@ -424,9 +424,12 @@ const createCall = publishMock.calls.find((c) => c.method === 'POST' && c.path =
 check('创建请求带了完整布局快照',
   !!createCall && createCall.body.layers.length === 2 && !!createCall.body.layers[0].skin.dataUrl,
   createCall ? ('layers=' + createCall.body.layers.length) : '没有创建请求');
-check('创建请求的层不带 updatedAt（服务端职责）',
-  !!createCall && !('updatedAt' in createCall.body.layers[0]),
+check('创建请求的层不带版本戳（服务端职责）',
+  !!createCall && !('skinUpdatedAt' in createCall.body.layers[0]) && !('layoutUpdatedAt' in createCall.body.layers[0]),
   createCall ? Object.keys(createCall.body.layers[0]).join(',') : '');
+check('创建请求不再带冗余的画布尺寸（底图尺寸就是画布尺寸）',
+  !!createCall && !('doc' in createCall.body),
+  createCall ? Object.keys(createCall.body).join(',') : '');
 check('过期天数随发布请求走（发了 7 天）',
   !!createCall && createCall.body.expiresDays === 7,
   createCall ? String(createCall.body.expiresDays) : '');

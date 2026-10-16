@@ -3,11 +3,12 @@
  * Copyright 2026 Dainsleif · Apache License 2.0
  *
  * 由 tools/run-e2e.mjs 用 cdp.mjs 分别驱动，阶段由 URL 参数决定：
- *   - ?room=<id>&bfstage=editor   编辑者：布局冻结，只能换肤，PATCH 增量 + 冲突回合
- *   - ?room=<id>&bfstage=admin    管理员：全量同步（挪动/新增）+ 删除房间
+ *   - ?room=<id>&bfstage=editor   编辑者：布局冻结，只能换肤，差量提交 + 冲突回合
+ *   - ?room=<id>&bfstage=admin    管理员：挪位置 / 新增 / 换底图，删除房间
  *
  * 后端由 /src/dev/collabMock.ts 在页内模拟；房间号与密码由发布阶段的
  * window.__BFPLUS_PUBLISH__ 结果带过来（mock 两侧用同一组硬编码密码）。
+ * 这一节的重点是"差量"：提交里只允许出现改动过的那一行与那些字段。
  */
 
 const results = [];
@@ -69,13 +70,13 @@ const mock = installCollabMock({
       id: 'srv-1', name: '头像一', x: 40, y: 50, size: 100, rotation: 0, opacity: 1,
       overlay: true, flipH: false, visible: true, order: 0,
       skin: { dataUrl: makeFaceDataUrl('rgb(200,60,60)', 'rgb(60,60,200)'), width: 16, height: 8, frontOnly: true },
-      updatedAt: 1000,
+      skinUpdatedAt: 1000, layoutUpdatedAt: 1000,
     },
     {
       id: 'srv-2', name: '头像二', x: 180, y: 70, size: 80, rotation: 0, opacity: 1,
       overlay: true, flipH: false, visible: true, order: 1,
       skin: { dataUrl: makeFaceDataUrl('rgb(60,180,60)', 'rgb(180,180,60)'), width: 16, height: 8, frontOnly: true },
-      updatedAt: 1001,
+      skinUpdatedAt: 1001, layoutUpdatedAt: 1001,
     },
   ],
 });
@@ -130,37 +131,43 @@ if (isEditor) {
   check('编辑者新增头像被拒绝', editor.layers.length === 2 && editor.notice && editor.notice.tone === 'warn',
     editor.layers.length + ' / ' + (editor.notice && editor.notice.message));
 
+  mock.resetPatches();
   await collabStore.submitChanges();
   await sleep(1000);
   check('增量提交成功清空待提交', collabStore.dirtyCount.value === 0, String(collabStore.dirtyCount.value));
-  const patch = mock.state.lastPatchUpdates;
+  const patch = mock.patchSummary().updates;
   check('PATCH 只带皮肤与并发凭证',
-    !!patch && patch.length === 1 && patch[0].id === 'srv-1' && typeof patch[0].skin.dataUrl === 'string',
-    patch ? Object.keys(patch[0]).join(',') : '没有 PATCH');
+    patch.length === 1 && patch[0].id === 'srv-1' && !!patch[0].skin && typeof patch[0].skin.dataUrl === 'string',
+    patch.length ? Object.keys(patch[0]).join(',') : '没有 PATCH');
   check('PATCH 没带位置字段（协议不变性）',
-    !!patch && !('x' in patch[0]) && !('y' in patch[0]) && !('size' in patch[0]),
-    patch ? 'ok' : '没有 PATCH');
+    patch.length > 0 && !('x' in patch[0]) && !('y' in patch[0]) && !('size' in patch[0]) && !('layout' in patch[0]),
+    patch.length ? 'ok' : '没有 PATCH');
   const stored = mock.state.avatars.find((a) => a.id === 'srv-1');
   check('服务端位置原封未动', stored.x === xBefore && !!stored.skin && stored.skin.dataUrl.length > 0,
     stored.x + ' / skin=' + (stored.skin ? stored.skin.dataUrl.length : 0));
-  check('PATCH 后 revision 前进', mock.state.revision > 3, String(mock.state.revision));
+  check('服务端皮肤版本戳前进', !!stored && stored.skinUpdatedAt > 1000, stored ? String(stored.skinUpdatedAt) : '');
+  check('服务端布局版本戳没被动过（这次只换了皮肤）',
+    !!stored && stored.layoutUpdatedAt === 1000, stored ? String(stored.layoutUpdatedAt) : '');
+  check('没有重发没动过的那一行', patch.length === 1, String(patch.length));
   check('编辑阶段无协议违规', mock.violations.length === 0, mock.violations.join('；'));
+  check('全量覆盖那条老路一次都没被调用', mock.state.putCalls === 0, String(mock.state.putCalls));
 
   // 冲突回合：mock 掐掉时间戳校验 → 全部 conflict
   mock.setConflictAll(true);
   await editorStore.useSkinFile(new File([await makePng(64, 32, '#ff8a00')], 'again.png', { type: 'image/png' }));
   await sleep(500);
   check('第二处改动进入待提交', collabStore.dirtyCount.value === 1, String(collabStore.dirtyCount.value));
+  mock.resetPatches();
   await collabStore.submitChanges();
   await sleep(1000);
   check('冲突后保留待提交并给出提示',
     collabStore.dirtyCount.value === 1 && editor.notice && editor.notice.tone === 'warn',
     collabStore.dirtyCount.value + ' / ' + (editor.notice && editor.notice.message));
-  const retry = mock.state.lastPatchUpdates;
-  check('冲突请求带了并发凭证', !!retry && retry.length === 1 && retry[0].expectUpdatedAt !== undefined,
-    retry ? String(retry[0].expectUpdatedAt) : '没有 PATCH');
+  const retry = mock.patchSummary().updates;
+  check('冲突请求带了皮肤并发凭证', retry.length === 1 && retry[0].expectSkinUpdatedAt !== undefined,
+    retry.length ? String(retry[0].expectSkinUpdatedAt) : '没有 PATCH');
 } else {
-  // —— 管理员：挪位置 + 新增 + 全量同步 ——
+  // —— 管理员：挪位置 + 新增，走的都是差量 ——
   editorStore.updateLayer(first.id, { x: 50, y: 60 });
   editorStore.addAvatar();
   await sleep(300);
@@ -168,24 +175,44 @@ if (isEditor) {
     editor.layers.length === 3 && editor.layers.find((l) => l.id === 'srv-1').x === 50,
     editor.layers.length + ' / x=' + editor.layers.find((l) => l.id === 'srv-1').x);
 
+  mock.resetPatches();
   await collabStore.submitChanges();
   await sleep(1200);
-  check('全量同步成功', editor.notice && editor.notice.tone === 'success', editor.notice && editor.notice.message);
-  const put = mock.state.lastPut;
-  check('PUT 带了 ifRevision 凭证', !!put && put.ifRevision === 3, put ? String(put.ifRevision) : '没有 PUT');
-  check('PUT 全量包含 3 条头像', !!put && put.layers.length === 3, put ? String(put.layers.length) : '没有 PUT');
+  check('差量提交成功', editor.notice && editor.notice.tone === 'success', editor.notice && editor.notice.message);
+  const patch = mock.patchSummary();
+  const layoutOf = (patch.updates[0] && patch.updates[0].layout) || {};
+  check('只提交改动过的那一行',
+    patch.updates.length === 1 && patch.updates[0].id === 'srv-1',
+    'updates=' + patch.updates.length + ' ids=' + patch.updates.map((u) => u.id).join(','));
+  check('布局差量只带变了的字段 x/y',
+    JSON.stringify(Object.keys(layoutOf)) === '["x","y"]',
+    Object.keys(layoutOf).join(','));
+  check('布局差量带的是布局版本戳',
+    patch.updates[0]?.expectLayoutUpdatedAt === 1000 && patch.updates[0]?.expectSkinUpdatedAt === undefined,
+    JSON.stringify({ layout: patch.updates[0]?.expectLayoutUpdatedAt, skin: patch.updates[0]?.expectSkinUpdatedAt }));
+  check('新增的头像走 adds，没有重发整间房',
+    patch.adds.length === 1 && patch.adds[0].id === editor.layers[2].id
+      && !!patch.adds[0].skin && typeof patch.adds[0].skin.dataUrl === 'string',
+    'adds=' + patch.adds.length + ' id=' + (patch.adds[0]?.id ?? '-'));
+  check('没有误报删除', patch.deletes.length === 0, String(patch.deletes.length));
   check('位置变更在服务端生效',
     mock.state.avatars.length === 3 && mock.state.avatars.find((a) => a.id === 'srv-1').x === 50,
     mock.state.avatars.length + ' / ' + mock.state.avatars.map((a) => a.x).join(','));
-  check('PUT 后 revision 前进', mock.state.revision > 3, String(mock.state.revision));
+  check('没动过的那一行版本戳没变',
+    mock.state.avatars.find((a) => a.id === 'srv-2').layoutUpdatedAt === 1001,
+    String(mock.state.avatars.find((a) => a.id === 'srv-2').layoutUpdatedAt));
+  check('全量覆盖那条老路一次都没被调用', mock.state.putCalls === 0, String(mock.state.putCalls));
+  check('管理员阶段无协议违规', mock.violations.length === 0, mock.violations.join('；'));
 
-  // —— 管理员换底图：走预签名直传 + 回执确认，再随全量同步落图层 ——
+  // —— 管理员换底图：走预签名直传 + 回执确认，只动底图，一根头像头发都不碰 ——
+  const stampsBefore = mock.state.avatars.map((a) => a.id + ':' + a.skinUpdatedAt + ':' + a.layoutUpdatedAt).join('|');
   const swapBlob = await makePng(320, 200, '#009966');
   await editorStore.setBaseImage(new File([swapBlob], '新底图.png', { type: 'image/png' }));
   await sleep(600);
+  mock.resetPatches();
   await collabStore.submitChanges();
   await sleep(1500);
-  check('换底图后全量同步成功',
+  check('换底图成功',
     editor.notice && editor.notice.tone === 'success',
     editor.notice && editor.notice.message);
   check('新底图字节直传到了存储（绕过函数）',
@@ -194,7 +221,12 @@ if (isEditor) {
     // editor 存底图名时约定剥掉扩展名
     mock.state.baseImage && mock.state.baseImage.name === '新底图' && mock.state.status === 'ready',
     mock.state.baseImage ? mock.state.baseImage.name : '没有底图');
-  check('换底图后 revision 继续前进', mock.state.revision > 4, String(mock.state.revision));
+  const stampsAfter = mock.state.avatars.map((a) => a.id + ':' + a.skinUpdatedAt + ':' + a.layoutUpdatedAt).join('|');
+  check('换底图没有改动任何一行头像',
+    stampsBefore === stampsAfter, stampsAfter);
+  check('换底图也没走全量覆盖那条路', mock.state.putCalls === 0, String(mock.state.putCalls));
+  check('只换底图时不发多余的差量', mock.patchSummary().updates.length === 0 && mock.patchSummary().adds.length === 0,
+    JSON.stringify({ updates: mock.patchSummary().updates.length, adds: mock.patchSummary().adds.length }));
 
   // —— 删除房间 ——
   await collabStore.removeRoom();

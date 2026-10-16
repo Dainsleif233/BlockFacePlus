@@ -1,11 +1,15 @@
 /*!
  * BlockFace+ · 协同房间的前端协议类型
  * Copyright 2026 Dainsleif · Apache License 2.0
+ *
+ * 服务端的"表"与这里一一对应：
+ *   房间身份（只读） / 底图（画布尺寸 + 指针） / 头像行（布局字段 + 皮肤字段 + 两个版本戳）
+ * 一次提交只带**改动过的东西**，服务端只写被提到的那些行。
  */
 
 import type { PresetSkin } from '../model/preset';
 
-/** 房间的画布尺寸（= 底图尺寸） */
+/** 房间的画布尺寸（= 底图尺寸，只有这一份真相） */
 export interface RoomDoc {
   width: number;
   height: number;
@@ -19,8 +23,9 @@ export interface RoomBaseImage {
 }
 
 /**
- * 一条头像记录 = 预设里的 PresetLayer + 身份（id）与并发凭证（updatedAt）。
- * 服务端一头像一键，改内容就是覆盖这一个 key，天然免冲突。
+ * 一行头像 = 布局字段 + 皮肤字段 + 两个版本戳。
+ * 两个版本戳分开：挪位置只推进 layoutUpdatedAt，换皮肤只推进 skinUpdatedAt，
+ * 于是"有人在挪位置"和"有人在换皮肤"不会互相判成冲突。
  */
 export interface RoomAvatarRecord {
   id: string;
@@ -36,8 +41,10 @@ export interface RoomAvatarRecord {
   /** 图层顺序，0 在最底层 */
   order: number;
   skin: PresetSkin | null;
-  /** 上次更新时间戳，编辑者提交时带上它做逐条冲突检查 */
-  updatedAt: number;
+  /** 皮肤内容的版本戳，换皮肤时带回去做并发检查 */
+  skinUpdatedAt: number;
+  /** 布局字段的版本戳，挪位置时带回去做并发检查 */
+  layoutUpdatedAt: number;
 }
 
 export interface RoomInfo {
@@ -46,7 +53,6 @@ export interface RoomInfo {
   baseImage: RoomBaseImage | null;
   createdAt: number;
   expiresAt: number;
-  revision: number;
   status: 'draft' | 'ready';
 }
 
@@ -58,11 +64,10 @@ export interface RoomSnapshot {
   role: RoomRole;
 }
 
-/** 创建/全量同步时的一条头像草稿：updatedAt 由服务端生成，客户端不带 */
-export type RoomAvatarDraft = Omit<RoomAvatarRecord, 'updatedAt'>;
+/** 新增一行头像时提交的草稿：版本戳由服务端生成，客户端不带 */
+export type RoomAvatarDraft = Omit<RoomAvatarRecord, 'skinUpdatedAt' | 'layoutUpdatedAt'>;
 
 export interface CreateRoomPayload {
-  doc: RoomDoc;
   baseImage: { name: string; type: string; width: number; height: number };
   layers: RoomAvatarDraft[];
   /** 过期天数，只认 3 / 7 / 14 */
@@ -77,16 +82,47 @@ export interface CreateRoomResult {
   upload: { url: string; key: string; expiresAt: number };
 }
 
-/** 编辑者一次增量提交的最小单元：换掉的皮肤 + 旧时间戳做并发检查 */
+/** 布局字段的局部补丁：只带真的变了的键，没带的键服务端一律不动 */
+export interface LayoutPatch {
+  name?: string;
+  x?: number;
+  y?: number;
+  size?: number;
+  rotation?: number;
+  opacity?: number;
+  overlay?: boolean;
+  flipH?: boolean;
+  visible?: boolean;
+  order?: number;
+}
+
+/** 改一行：只带改动的那部分（换皮肤 / 挪位置 可以同时带，也可以只带一个） */
 export interface AvatarUpdate {
   id: string;
-  skin: PresetSkin;
-  expectUpdatedAt?: number;
+  layout?: LayoutPatch;
+  skin?: PresetSkin;
+  /** 布局并发凭证：进房时拿到的 layoutUpdatedAt */
+  expectLayoutUpdatedAt?: number;
+  /** 皮肤并发凭证：进房时拿到的 skinUpdatedAt */
+  expectSkinUpdatedAt?: number;
+}
+
+export interface PatchPayload {
+  updates?: AvatarUpdate[];
+  adds?: RoomAvatarDraft[];
+  deletes?: string[];
+}
+
+export interface PatchItemResult {
+  id: string;
+  ok: boolean;
+  error?: string;
+  skinUpdatedAt?: number;
+  layoutUpdatedAt?: number;
 }
 
 export interface PatchResult {
-  results: { id: string; ok: boolean; updatedAt?: number; error?: string }[];
-  revision: number;
+  results: PatchItemResult[];
 }
 
 export const EXPIRY_DAYS = [3, 7, 14] as const;
