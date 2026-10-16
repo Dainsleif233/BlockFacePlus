@@ -55,6 +55,8 @@ export async function onRequestGet(context) {
       headers: {
         'Content-Type': meta.baseImage.type,
         'Cache-Control': 'private, max-age=60',
+        // 响应头不允许非 ASCII：文件名 percent-encoding，前端 decodeURIComponent 解回来
+        'X-BF-Base-Name': encodeURIComponent(meta.baseImage.name || '底图'),
       },
     });
   } catch (error) {
