@@ -1,20 +1,26 @@
-<!-- BlockFace · Copyright 2026 Dainsleif · Apache License 2.0 -->
-# BlockFace
+<!-- BlockFace+ · Copyright 2026 Dainsleif · Apache License 2.0 -->
+# BlockFace+
 
-> 纯前端 Minecraft 头像贴图与头图合成工具 —— 在浏览器中为图片自由拼贴 Minecraft 像素头像与通用头像图片，零服务端上传，开箱即用。
+> 纯前端 Minecraft 头像贴图与头图合成工具 —— 在浏览器中为图片自由拼贴 Minecraft 像素头像与通用头像图片；支持一键发布协同房间，多人在线共同编辑。
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Vue 3](https://img.shields.io/badge/Vue-3.5-brightgreen.svg)](https://vuejs.org/)
-[![Vite](https://img.shields.io/badge/Vite-6.x-646CFF.svg)](https://vitejs.dev/)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue.svg)](https://www.typescriptlang.org/)
+[![Vite](https://img.shields.io/badge/Vite-8.x-646CFF.svg)](https://vitejs.dev/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-6.x-blue.svg)](https://www.typescriptlang.org/)
 
 ---
 
-![BlockFace 界面预览](docs/screenshot.png)
+![BlockFace+ 界面预览](docs/screenshot.png)
 
 ## ✨ 核心特性
 
-- 🔒 **纯本地计算**：无服务端、无账户体系。底图与皮肤解析、图层合成全部在浏览器端本地完成，保护用户隐私。
+- 🔒 **纯本地计算（离线模式）**：底图与皮肤解析、图层合成全部在浏览器端本地完成，保护用户隐私。
+- 🤝 **在线协同房间**：
+  - 一键把当前画布（底图 + 全部头像）发布成协同房间，生成专属链接与两把密码；
+  - 拿到链接的人凭**编辑密码**只能更换头像皮肤——布局（位置/尺寸/旋转/层级/增删）由发起者锁定，前后端双重防线；
+  - **管理员密码**可全量编辑、更换底图与删除房间，提交带版本并发凭证，冲突自动重载；
+  - 房间按 3 / 7 / 14 天过期，到期连同全部内容自动清理；
+  - 底图经预签名 URL 直传对象存储，绕过云函数请求体上限。
 - 🧩 **多源素材与通用图片支持**：
   - 内置经典 Steve / Alex 皮肤，开箱即选；
   - 支持正版 Minecraft 玩家 ID 单个或批量检索；
@@ -37,10 +43,6 @@
   - 素材库支持单张删除与一键清理闲置素材；
   - **撤销栈保护机制**：历史记录中被引用的素材受到完整保护，防止用户清理素材后撤销导致图层变隐形；
   - 离屏 Canvas 采用 48 张容量的 LRU 缓存与定点淘汰（`evictSkin`），大图自动内存回收（GC）。
-- 💾 **全功能图层预设系统**：
-  - 预设面板常驻右侧属性栏底部，支持随时将画布上的头像排版一键保存为预设；
-  - 预设大图自动等比采样（限制 512px 内）防 LocalStorage 超限，且套用预设具备皮肤缺失自动回退兜底；
-  - 支持预设配置（JSON）导出与导入，包含完整内嵌素材，跨设备离线即开即用。
 
 ---
 
@@ -54,7 +56,7 @@
 
 ```bash
 # 克隆仓库
-git clone https://github.com/jsucraft/BlockFace.git
+git clone https://github.com/Dainsleif233/BlockFace.git
 cd BlockFace
 
 # 安装依赖
@@ -64,7 +66,19 @@ pnpm install
 pnpm dev
 ```
 
-启动后用浏览器访问 `http://localhost:5173/` 即可使用。
+启动后用浏览器访问 `http://localhost:5173/` 即可使用。**离线（单机）功能开箱即用**。
+
+### 在线协同（EdgeOne Makers）
+
+协同房间由 EdgeOne Makers 云函数 + Blob 存储承载（无需绑定 KV）：
+
+```bash
+# 启动云函数本地开发（监听 8088；pnpm dev 已把 /api 代理过去）
+pnpm dev:api
+
+# 部署上线
+edgeone makers deploy
+```
 
 ### 构建生产
 
@@ -79,10 +93,10 @@ pnpm preview
 ### 测试验证
 
 ```bash
-# 运行单元测试 (Vitest) —— 涵盖数学变换、预设序列化、LRU缓存与素材历史保护
+# 运行单元测试 (Vitest) —— 涵盖数学变换、皮肤数据格式、协同切块与素材历史保护
 pnpm test
 
-# 运行真实浏览器端到端冒烟测试 (基于本机 Chrome DevTools Protocol)
+# 运行三阶段真实浏览器端到端测试（发布 → 编辑者 → 管理员，基于本机 Chrome DevTools Protocol）
 pnpm e2e
 ```
 
@@ -104,11 +118,13 @@ pnpm e2e
 | **适应屏幕** | `Ctrl+0` (Mac: `⌘+0`) | 画布视口缩放并居中自适应窗口 |
 | **导入底图/贴纸**| 拖拽图片至窗口任意区域 / `Ctrl+V` 粘贴 | 无底图时设为底图；已有底图时自动转为头像贴纸 |
 
+> 注：布局类快捷键与手势在协同**编辑者**模式下整体冻结，仅保留「点选头像 → 换肤」。
+
 ---
 
 ## 🎨 设计语言：8px Blockgrid
 
-BlockFace 界面采用严格的 **8px 积木网格（Blockgrid）** 体系：
+BlockFace+ 界面采用严格的 **8px 积木网格（Blockgrid）** 体系：
 - **纯 CSS 像素手搓图标**：零 emoji、零位图字体，使用纯 CSS 方块拼装，保持纯粹的像素复古美感。
 - **全平涂硬边**：零圆角、零渐变、零模糊阴影，依托 1px 细线、4px 语义色条与清晰的层次划分。
 - **高对比度标准**：全界面文字与核心控件均经过 WCAG AA / AAA 级别对比度审计。
@@ -120,8 +136,8 @@ BlockFace 界面采用严格的 **8px 积木网格（Blockgrid）** 体系：
 ## 📚 更多文档
 
 - [品牌与界面设计规范 (Brand & Design Spec)](docs/brand-spec.md)：色彩令牌、排版阶梯、组件语法与交互细则。
-- [技术设计与实现要点 (Product & Technical Facts)](docs/product-facts.md)：Mojang API 限制、皮肤 UV 贴图算法、画布坐标系与视口变换数学、LRU 显存缓存与历史保护。
-- [界面需求规格说明 (Design Spec)](docs/design-spec.md)：产品定位、信息架构与交互规格。
+- [技术设计与实现要点 (Product & Technical Facts)](docs/product-facts.md)：Mojang API 限制、皮肤 UV 贴图算法、画布坐标系与视口变换数学、协同房间数据架构、LRU 显存缓存与历史保护。
+- [界面需求规格说明 (Design Spec)](docs/design-spec.md)：产品定位、信息架构、协同房间与交互规格。
 
 ---
 
@@ -129,4 +145,4 @@ BlockFace 界面采用严格的 **8px 积木网格（Blockgrid）** 体系：
 
 - 采用 [Apache License 2.0](LICENSE) 开源协议。
 - 第三方资产与依赖致谢请见 [NOTICE](NOTICE)。
-- **免责声明**：BlockFace 是一个兼容 Minecraft 皮肤格式的独立第三方工具，与 Mojang Studios / Microsoft 没有任何官方隶属关系。Minecraft 是 Mojang Studios 的注册商标。
+- **免责声明**：BlockFace+ 是一个兼容 Minecraft 皮肤格式的独立第三方工具，与 Mojang Studios / Microsoft 没有任何官方隶属关系。Minecraft 是 Mojang Studios 的注册商标。
