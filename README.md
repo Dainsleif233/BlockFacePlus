@@ -19,9 +19,9 @@
   - 一键把当前画布（底图 + 全部头像）发布成协同房间，生成专属链接与两把密码；
   - 拿到链接的人凭**编辑密码**只能更换头像皮肤——布局（位置/尺寸/旋转/层级/增删）由发起者锁定，前后端双重防线；
   - **管理员密码**可自由改动布局（挪动/缩放/旋转/增删/改名）、更换底图与删除房间；提交是**差量**的：只发改动过的行与字段，按域比对版本（改布局只比布局戳、换内容只比内容戳），冲突只影响那一条，不会把整次提交打回；
-  - 存储里「换底图 / 换头像内容 / 保存布局」是三张互不相干的表，谁也覆盖不了谁刚写的东西；
-  - 房间按 3 / 7 / 14 天过期，到期连同全部内容自动清理；
-  - 底图经预签名 URL 直传对象存储，绕过云函数请求体上限。
+  - 数据落 SQLite（WAL）：房间 / 头像行 / 底图指针各成一张表，布局字段与皮肤字段的版本戳分域，谁也覆盖不了谁刚写的东西；
+  - 房间可选 3 / 7 / 14 / 30 / 90 天过期，到期连同全部内容自动清理（读到即惰性过期 + 后台定时清扫，不靠谁记得去点一下）；
+  - 底图字节直接上传到自建后端、落在本地文件系统，没有预签名直传也没有第三方对象存储，体积上限只取决于你愿意在 nginx 上放开多大请求体。
 - 🧩 **多源素材与通用图片支持**：
   - 内置经典 Steve / Alex 皮肤，开箱即选；
   - 支持正版 Minecraft 玩家 ID 单个或批量检索；
@@ -52,6 +52,7 @@
 ### 环境要求
 - Node.js 18.0 或更高版本
 - 包管理器：`pnpm`
+- 联调在线协同时另需 [uv](https://docs.astral.sh/uv/)（Python 3.12+ 由 uv 自动准备，不用手工装 Python）
 
 ### 安装与启动
 
@@ -69,27 +70,48 @@ pnpm dev
 
 启动后用浏览器访问 `http://localhost:5173/` 即可使用。**离线（单机）功能开箱即用**。
 
-### 在线协同（EdgeOne Makers）
+### 在线协同（FastAPI + 自有 VPS）
 
-协同房间由 EdgeOne Makers 云函数 + Blob 存储承载（无需绑定 KV）：
+协同后端是一个独立的 FastAPI 服务（SQLite 元数据 + 本地文件存底图），跑在普通 VPS 上；
+前端仍是纯静态产物，发到边缘 Pages，构建时用 `VITE_API_BASE_URL` 指向后端。
 
 ```bash
-# 启动云函数本地开发（监听 8088；pnpm dev 已把 /api 代理过去）
-pnpm dev:api
+# 装 uv（macOS / Linux；Windows 用 winget install --id=astral-sh.uv -e）
+curl -LsSf https://docs.astral.sh/uv/install.sh | sh
 
-# 部署上线
-edgeone makers deploy
+# 同步后端依赖（backend/pyproject.toml + uv.lock）
+uv sync --directory backend
+
+# 起后端：监听 127.0.0.1:8088（pnpm dev:api 是同一条命令）
+uv run --directory backend uvicorn bfp.main:app --reload --port 8088
 ```
+
+另开一个终端起前端即可联调 —— Vite 已经把 `/api` 代理到 `127.0.0.1:8088`，
+所以本地开发时 `VITE_API_BASE_URL` 留空（同源）：
+
+```bash
+pnpm dev
+```
+
+生产部署（VPS 上的 systemd + nginx、SQLite 备份、边缘 Pages 发布）见
+[**VPS 部署指南**](docs/deploy-vps.md)；接口、上限与错误码见
+[**协同后端 API 契约**](docs/collab-api.md)。
 
 ### 构建生产
 
 ```bash
-# 检查类型并构建生产产物
+# 检查类型并构建生产产物（VITE_API_BASE_URL 留空 = 同源）
 pnpm build
+
+# 指向线上后端构建（跨域部署时的正常做法；改了地址必须重新 build）
+VITE_API_BASE_URL=https://api.example.com pnpm build
 
 # 本地预览生产构建产物
 pnpm preview
 ```
+
+> `VITE_API_BASE_URL` 是**构建期**变量（不是运行时读的），会被烧进产物并同时决定 CSP 里放行的后端来源；
+> 末尾斜杠会被自动去掉。Windows PowerShell 用 `$env:VITE_API_BASE_URL = "..."; pnpm build`。
 
 ### 测试验证
 
@@ -97,9 +119,27 @@ pnpm preview
 # 运行单元测试 (Vitest) —— 涵盖数学变换、皮肤数据格式、协同差量提交与素材历史保护
 pnpm test
 
-# 运行三阶段真实浏览器端到端测试（发布 → 编辑者 → 管理员，基于本机 Chrome DevTools Protocol）
+# 运行后端单元测试（pytest；首次需先 uv sync --directory backend）
+uv run --directory backend pytest -q
+
+# 运行三阶段真实浏览器端到端测试（发布 → 编辑者 → 管理员；基于本机 Chrome DevTools Protocol，
+# 会自己拉起真实的 FastAPI 后端与临时 Vite 服务，因此需要 uv 与本机 Chrome）
 pnpm e2e
 ```
+
+### 常用脚本
+
+| 脚本 | 作用 |
+| :--- | :--- |
+| `pnpm dev` | 起 Vite 开发服务器（5173；`/api` 代理到本机后端 127.0.0.1:8088） |
+| `pnpm dev:api` | 起 FastAPI 后端（热重载，监听 8088） |
+| `pnpm build` | 类型检查 + 构建生产产物到 `dist/` |
+| `pnpm preview` | 本地预览生产产物（同样把 `/api` 代理到本机后端） |
+| `pnpm test` | 单元测试（Vitest，跑一次） |
+| `pnpm test:watch` | 单元测试（监听模式） |
+| `pnpm typecheck` | 只跑 `vue-tsc -b` 类型检查 |
+| `pnpm e2e` | 三阶段真实浏览器端到端测试（需本机 Chrome） |
+| `pnpm rooms` | 房间运维 CLI（`bfp-ops` 的快捷方式，直接读写数据目录，不走 HTTP，详见部署文档） |
 
 ---
 
@@ -139,6 +179,8 @@ BlockFace+ 界面采用严格的 **8px 积木网格（Blockgrid）** 体系：
 - [品牌与界面设计规范 (Brand & Design Spec)](docs/brand-spec.md)：色彩令牌、排版阶梯、组件语法与交互细则。
 - [技术设计与实现要点 (Product & Technical Facts)](docs/product-facts.md)：Mojang API 限制、皮肤 UV 贴图算法、画布坐标系与视口变换数学、协同房间数据架构、LRU 显存缓存与历史保护。
 - [界面需求规格说明 (Design Spec)](docs/design-spec.md)：产品定位、信息架构、协同房间与交互规格。
+- [协同后端 API 契约 (Collab API)](docs/collab-api.md)：端点、请求/响应结构、错误码与全部可调上限。**这是冻结契约**，前端、后端、e2e 与部署文档都以它为准。
+- [VPS 部署指南 (Deploy on VPS)](docs/deploy-vps.md)：从零装 uv、systemd 常驻、nginx 反代与 HTTPS、SQLite 备份与 `bfp-ops`、以及边缘 Pages 的构建与发布。
 
 ---
 

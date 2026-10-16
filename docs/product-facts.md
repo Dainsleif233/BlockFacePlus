@@ -79,20 +79,23 @@ view.y = view.y + offset.y * (1 - k) + (size.height * (k - 1)) / 2;
 
 ## 4. 协同房间数据架构
 
-协同房间把「一张图上的全部头像」托管到 EdgeOne Makers 云函数 + Blob 存储，实现多人在线共同编辑。浏览器端皮肤数据格式沿用单机版的内嵌正脸双层方案（见 4.2）；「预设面板 / JSON 文件导入导出」功能已由协同房间取代，`PresetSkin` 结构与记录归一化继续作为房间头像的数据底座。
+协同房间把「一张图上的全部头像」托管到自建 VPS 上的 FastAPI 后端（SQLite 存元数据 + 本地文件存底图字节），实现多人在线共同编辑。浏览器端皮肤数据格式沿用单机版的内嵌正脸双层方案（见 4.2）；「预设面板 / JSON 文件导入导出」功能已由协同房间取代，`PresetSkin` 结构与记录归一化继续作为房间头像的数据底座。部署方式见 [deploy-vps.md](deploy-vps.md)，接口与上限见 [collab-api.md](collab-api.md)。
 
-### 4.1 存储底座与键布局
-- 全部持久化走 `@edgeone/pages-blob` 的 `getStore({ name: 'blockface-plus', consistency: 'strong' })` 单例，不使用 KV；强一致保证「写完的下一次读必能读到」。
-- **一头像一键隔离**：每条头像是独立 Blob，改内容就是覆盖一个 key，天然免读-改-写竞争。
-- **三种操作三张表，互不相干**：换底图只写 `base.json` 与图片字节；换某条头像的内容只写那一行的皮肤字段；保存布局只写那一行的布局字段。谁都不必先读别人的表，更不可能把别人的写入覆盖掉——老版本「整房一份 meta 里同时塞底图指针、画布尺寸、状态与版本号」的结构已不存在（不留兼容层，老房间按未发布处理）。
-- 键布局：
-  - `rooms/<roomId>/meta.json`：房间身份（房间号、创建/过期时间、两把密码的哈希），建房后只读；
-  - `rooms/<roomId>/base.json`：底图指针（key/类型/名字）、画布尺寸、状态 draft/ready、待确认的 pending 键；
-  - `rooms/<roomId>/avatars/<layerId>.json`：单条头像记录（布局字段 + 皮肤 + 两个版本戳）；
-  - `rooms/<roomId>/images/base.<后缀>`：底图字节（预签名直传目标；同后缀固定键，重传即覆盖）；
-  - `index/<roomId>.json`：房间索引（过期清扫用，只存 roomId 与过期时间）；
-  - `throttle/<roomId>.json`：密码试错计数（见 4.5）。
-- 容量边界：云函数请求体 6MB、挂钟 120 秒；底图单张 ≤ 10MB；文档边长 ≤ 8192；一间房最多 512 条头像（`MAX_LAYERS`）。
+### 4.1 存储底座与表布局
+- 元数据落 SQLite（`{BF_DATA_DIR}/bfp.sqlite3`）：WAL 日志模式，单连接 + 应用层写锁，所有写路径都走 `Database.transaction()`（`BEGIN IMMEDIATE` + 异常回滚），写与写之间天然串行 —— 业务层不必再叠一把锁，也不会出现两个写者交叉覆盖。
+- 底图字节**不进数据库**，落本地文件 `{BF_DATA_DIR}/base/{roomId}.{ext}`：同一间房、同一个后缀只对应一个文件，换底图就是覆盖它并清掉同房间不再被引用的其它后缀，不留孤儿文件。
+- **四张表各有一个主人，物理上互不重叠**（表结构见 `backend/src/bfp/schema.sql`）：
+
+| 表 | 存什么 | 谁写 |
+| :-- | :-- | :-- |
+| `rooms` | 房间身份：房间号、创建与过期时间、两把密码的 scrypt 哈希与长度 | 只在建房时写一次，此后没有任何代码路径再写它 |
+| `room_base` | 底图指针（后缀 / 类型 / 名字）+ 画布尺寸 + 状态 `draft` / `ready` | 只有上传底图这条路 |
+| `avatars` | 一个头像一行，联合主键 `(room_id, id)`；布局字段与皮肤字段（`skin_json` 存整份 `PresetSkin` 的 JSON 原文，`NULL` = 这一行没有皮肤）各有各的版本戳 `layout_updated_at` / `skin_updated_at` | 只有差量提交这条路，且只写被提到的行与字段 |
+| `room_throttle` | 密码试错限流：窗口起点、失败次数、锁定到期时刻 | 只在鉴权失败时 |
+
+- 三个索引各对应一条访问路径：`idx_rooms_expires_at(expires_at)` 与 `idx_room_base_status(status)` 给清扫用（按过期时间捞房间、按状态捞草稿房），`idx_avatars_order(room_id, order_index)` 给进房用（按 `order` 升序取整间房的头像行）。注意落库列名是 `order_index` —— `order` 是 SQL 关键字，对外（JSON 与前端类型）仍然是 `order`，写运维 SQL 时别找错列。
+- **为什么拆表**：更早的版本把底图指针、画布尺寸、房间状态与版本号塞在同一份房间元信息里整份回写，后写的那次必然带着自己开头读到的旧快照，把先写的成果覆盖掉 —— 实测能造出「底图指向一个已经被删掉的文件、房间永久打不开」。现在三件事落在互不重叠的表/列上，覆盖从根上不可能发生：`(room_id, id)` 主键就是当年「一个头像一个键」的等价物；布局补丁只 `UPDATE` 布局列，皮肤提交只 `UPDATE` 皮肤列。
+- 上限不再由平台决定：旧版受云函数请求体 6MiB 与挂钟 120 秒的硬限，现在只剩磁盘，以及你愿意在 nginx 上放开多大的请求体（默认值见 4.7）。
 
 ### 4.2 头像记录与内嵌皮肤格式
 - 单条头像记录（`RoomAvatarRecord`）：`id / name / x / y / size / rotation / opacity / overlay / flipH / visible / order / skin / skinUpdatedAt / layoutUpdatedAt`。`order` 决定图层顺序（0 在最底层）；两个版本戳都是服务端生成的并发凭证，**各管各的域**：换皮肤只比对 `skinUpdatedAt`，挪位置只比对 `layoutUpdatedAt`。
@@ -101,37 +104,62 @@ view.y = view.y + offset.y * (1 - k) + (size.height * (k - 1)) / 2;
 - MC 皮肤入库前只保留正脸双层（底层正脸 8×8 + 帽子外层 8×8 并排，16×8 或高清等比），通用头像图片等比限制在 512px 内，控制单条记录体积。
 
 ### 4.3 提交协议（谁能改什么）
-- **差量提交（`PATCH /api/rooms/:id/avatars`，写头像的唯一入口）**：请求体是 `{ updates, adds, deletes }` 三件套，服务端只写被提到的行、只写被带上的字段：
+- **差量提交（`PATCH /api/rooms/{roomId}/avatars`，写头像的唯一入口）**：请求体是 `{ updates, adds, deletes }` 三件套，服务端只写被提到的行、只写被带上的字段：
   - `updates: [{ id, layout?, skin?, expectLayoutUpdatedAt?, expectSkinUpdatedAt? }]`：`layout` 是布局字段的局部补丁（没带的键一律不动），`skin` 是整份皮肤记录；两个凭证只在**自己对应的域被写入时**才比对，不符的那一条单独返回 `{ ok: false, error: 'conflict' }`；
   - `adds: [整行记录]`：id 已被占用回 `exists`，绝不覆盖别人的行；
   - `deletes: [id]`：幂等，不比对版本戳。
   - 逐条返回 `{ results: [{ id, ok, error?, skinUpdatedAt?, layoutUpdatedAt? }] }`：某一条失败不影响同批其它条目；成功条目回带新版本戳，客户端只把成功的那些行推进基线，失败的原样留在「待提交」里。
   - 角色：编辑者只能带 `skin`（带了 `layout` 也照样不写入，不报错），`adds`/`deletes` 一律 403；管理员三者皆可。
-  - 边界只有体积：单次请求体 ≤ 4MB 字符（`MAX_PATCH_CHARS`，前端 `chunkBySize` 按体积切块、**条数不设限**），一次能提到的行数不超过「一间房最多 512 行」这个真实上限。
-- **全量覆盖（`PUT /api/rooms/:id`）已拆除**：回 405 并指路 `PATCH .../avatars`；`ifRevision` 乐观锁、房间级 `revision`、`MAX_PATCH_UPDATES` 一并消失。
-- **删除（`DELETE /api/rooms/:id`）**：仅管理员，物理清扫房间前缀下全部 Blob（含底图、头像行、throttle）与索引条目。
+  - 边界只有体积：单次请求体上限是 `BF_MAX_JSON_BODY_BYTES`（默认 256MiB；旧云函数版本受平台硬限只有 6MiB），前端 `chunkBySize` 按体积切块、**条数不设限**；一次能提到的行数上限就是「一间房最多 `BF_MAX_LAYERS`（默认 10000）行」这个真实上限。
+- **全量覆盖（`PUT /api/rooms/{roomId}`）已拆除**：契约里没有这个端点；`ifRevision` 乐观锁、房间级 `revision`、`MAX_PATCH_UPDATES` 一并消失。
+- **删除（`DELETE /api/rooms/{roomId}`）**：仅管理员，物理删除该房间的全部数据 —— `rooms` 里那一行（外键 `ON DELETE CASCADE` 带走 `room_base` / `avatars` / `room_throttle`）与 `base/` 下的底图文件。
 
-### 4.4 底图直传与回执
-- 建房响应携带预签名 PUT URL（有效期 600 秒），客户端把底图字节**直传 Blob 存储绕过云函数**（规避 6MB 请求体上限）；随后回执 `confirm` 校验体积（HEAD 拿不到对象就直接 409，绝不把房间推成「发布成功但底图 404」）≤ 10MB，把房间从 draft 切成 ready——**只写 `base.json`，不碰任何一行头像**。
-- 管理员换底图同链路：`sign` 申请固定键 `images/base.<后缀>` → 直传 → `confirm`（带 key）。confirm 手里只有 key 的后缀，用「后缀 → MIME」反查表还原类型；确认后清掉同前缀下不再被引用的底图，不让旧图白占额度。
-- 读取（`GET /api/rooms/:id/base`）：按密码鉴权，返回 `Content-Type`、`Cache-Control: private, max-age=60` 与 `X-BF-Base-Name`——响应头不允许非 ASCII，底图文件名以 percent-encoding 下发，前端 `decodeURIComponent` 解回原名（解不动回退「底图」）。
+### 4.4 底图上传与读取
+- **上传 / 更换（`POST /api/rooms/{roomId}/base`）**：`multipart/form-data`，字段 `file`（字节）、`name`（原始文件名，可含中文）、`width` / `height`（画布尺寸就是底图尺寸）；鉴权走 `X-BF-Room-Pwd`。草稿期编辑者或管理员都能传，房间 `ready` 之后**只有管理员**能换。只接受 PNG / JPEG / WebP / GIF，体积上限 `BF_MAX_BASE_IMAGE_BYTES`（默认 128MiB）。上传成功即把房间从 `draft` 切成 `ready` —— **只写 `room_base` 那一行，不碰任何一行头像**。
+- **没有预签名直传了**：预签名是「绕过云函数请求体上限」的手段 —— 让浏览器绕过函数、把字节直接 PUT 到对象存储。后端自己就在收字节、收完自己落盘，中间没有第二个跳板，「先申请 URL、再回执确认」这套两步协议也就失去了存在理由。省掉的不只是两次往返：旧协议里「签了名却没确认」会在存储里留一份永远没人引用的死文件，而现在上传只有「成功」和「失败」两种结果。
+- **写入是原子的**：先把上传字节写到 `base/` 下的隐藏临时文件（边收边写、边计数，超限立刻 413 并清掉半截文件），收完 `fsync` 再用 `os.replace` 原子换到 `{roomId}.{ext}`，最后删掉该房间其它后缀的旧图。直接往目标文件上写的话，中途崩掉库里指针就指向一张半截图，而且在下一次上传之前它"看起来一直是好的"。
+- **覆盖语义**：同一间房、同一个后缀只对应一个文件；换底图 = 覆盖同后缀文件 + 清掉不再被引用的其它后缀，不留孤儿文件（实现见 `backend/src/bfp/storage.py` 与 `backend/src/bfp/base.py`）。
+- **认类型只认字节魔数**：不信任客户端声明的 `Content-Type`，用文件头 32 字节判 PNG / JPEG / WebP / GIF。
+- **读取（`GET /api/rooms/{roomId}/base`）**：按密码鉴权，响应头带 `Content-Type`、`X-BF-Base-Name`（底图名以 percent-encoding 下发，前端 `decodeURIComponent` 解回原名，解不动回退「底图」）、`X-Content-Type-Options: nosniff` 与 `Cache-Control: private, max-age=60`；草稿态（底图还没传）返回 409。
 
 ### 4.5 密码与鉴权
 - 编辑密码 8 位、管理员密码 12 位；字符表剔除 `0/1/l/o` 等易混字符，并做拒绝采样保证均匀分布。
 - 落库只存 `scrypt$salt$hash`，校验用 `timingSafeEqual` 防时序侧信道；密码仅在创建响应里出现一次，之后任何接口都不回传。
-- 请求密码统一走 `X-BF-Room-Pwd` 请求头；密码试错按**房间**计数（60 秒窗口 10 次失败，计数落 `throttle/<roomId>.json`，冷启动不清零），超限回 429 并带上剩余秒数。已知代价：知道房间号的人可以故意把房主挡在门外 60 秒，换来的是多实例部署下不会各算各的。
+- 请求密码统一走 `X-BF-Room-Pwd` 请求头；密码试错按**房间**计数（默认 60 秒窗口 20 次失败，计数落 SQLite 的 `room_throttle` 表 —— 放进程内存里等于没写，重启就清零），超限回 429 并带上剩余秒数。计数进数据库换来的是：多进程/多实例部署下不会各算各的，重启也不会把已经攒下的失败次数抹掉。已知代价：知道房间号的人可以故意把房主挡在门外一个窗口。
 - 前端会话：密码只存 sessionStorage（`blockface-plus.room.<房间号>`），刷新不丢、关标签页即清空；发布成功后暂存的是管理员密码，房主进房即持管理权限。
 
 ### 4.6 生命周期与过期
-- 过期时间只认 3 / 7 / 14 天，创建时定死 `expiresAt`。
-- **惰性过期**：任何读路径发现 `expiresAt` 已过 → 就地删除房间全部 Blob 与索引 → 返回 410 语义，前端停留「房间已过期」界面。
-- **创建时摊销清扫**：每次建房捎带清扫一次过期索引，单批最多看 24 条（单页拉取 + 截断），历史房间再多也不会把创建接口拖进超时，剩余批次留给下一次创建。
+- 过期时间在创建时定死 `expiresAt`：`expiresDays` 可取 `1..BF_MAX_EXPIRY_DAYS`（默认 3650 天），前端 UI 提供 3 / 7 / 14 / 30 / 90 五个选项（默认 7）。
+- **惰性过期**：任何读路径发现 `expiresAt` 已过 → 就地删掉这个房间（连带头像行、底图文件、限流状态）→ 返回 410 语义，前端停留「房间已过期」界面。房间不会因为「清扫还没跑到」而变成能打开的僵尸。
+- **后台定时清扫**：后端是常驻进程，`BF_SWEEP_INTERVAL_SECONDS`（默认 1800 秒）跑一轮，捞出两类残留 —— 已过期的房间，以及超过 `BF_DRAFT_TTL_SECONDS`（默认 1 天）仍然没传底图的草稿房（另外，进程被 kill 时留下的 `.upload` 上传残片会跟着房间一起清掉）；设 `0` 关掉定时清扫，只留惰性过期。手工兜底是 `bfp-ops sweep`（用法见 [deploy-vps.md](deploy-vps.md) §7.3）。
+- **为什么不再是「创建时摊销清扫」**：摊销是云函数时代的产物 —— 那个运行时没有常驻进程，只能把清扫摊到请求上，代价是每次建房都要顺手干一件与建房无关的事，还得给单批条数设上限以免把创建接口拖进超时。现在换成定时任务：更直白、更好观测（`journalctl -u blockface-plus-api` 里就能看到每轮的结果），建房接口也不必再背这个包袱。
+
+### 4.7 上限（放宽后的默认值，全部可用环境变量覆盖）
+
+平台硬限消失之后，这些数字只服务于两件事：**防手滑**（挡住明显不是人传的数值）与**给运维一个旋钮**。
+完整表格（含每项对应的环境变量与旧版对照）在契约 [collab-api.md §4](collab-api.md)，这里只摘几条最能说明「放宽了什么」的：
+
+| 项目 | 环境变量 | 现在 | 旧云函数版本 |
+| :-- | :-- | --: | --: |
+| 一间房最多多少行头像 | `BF_MAX_LAYERS` | 10000 | 512 |
+| 单条内嵌皮肤 data URI 字符数 | `BF_MAX_SKIN_DATA_URL_CHARS` | 32000000 | 1500000 |
+| 底图字节上限 | `BF_MAX_BASE_IMAGE_BYTES` | 128MiB | 10MiB |
+| JSON 请求体上限 | `BF_MAX_JSON_BODY_BYTES` | 256MiB | 6MiB（平台硬限） |
+| 画布边长上限 | `BF_MAX_DOC_SIZE` | 65536 | 8192 |
+| 图层坐标绝对值上限 | `BF_MAX_POSITION` | 10000000 | 32768 |
+| 头像名长度 | `BF_MAX_AVATAR_NAME` | 512 | 200 |
+| 过期天数上限 | `BF_MAX_EXPIRY_DAYS` | 3650 | 14 |
+
+两个和运维直接相关的旋钮单独说一句：`BF_AUTH_MAX_FAILS`（窗口内允许的密码失败次数，默认 20）与
+`BF_SWEEP_INTERVAL_SECONDS`（后台清扫间隔，默认 1800 秒，`0` = 关闭）。
+实际生效的值随时可以用 `curl -s http://127.0.0.1:8088/api/config` 查 —— 它返回的就是后端自己认的那一份，
+改了 `api.env` 却忘了重启时，这个接口会立刻告诉你「你改的那个值没生效」。
 
 ---
 
 ## 5. 测试与工程质量保证
 
-- **单元测试 (Vitest)**：10 个测试套件、135 个单测用例，全面覆盖：
+- **单元测试 (Vitest)**：10 个测试套件、146 个单测用例（数字随代码演进，以 `pnpm test` 的输出为准），全面覆盖：
   - 几何变换与手势数学 (`transform.spec.ts`, `gesture.spec.ts`)
   - 皮肤 UV 贴图与规格解析 (`texture.spec.ts`)
   - 皮肤数据格式与头像记录归一化、内嵌材质安全防注入 (`preset.spec.ts`)
@@ -141,8 +169,9 @@ view.y = view.y + offset.y * (1 - k) + (size.height * (k - 1)) / 2;
   - 素材管理与撤销/重做历史引用保护 (`editor.spec.ts`)
   - 协同差量切块与请求层体积边界 (`collab/api.spec.ts`)
   - 差量计算：只发变了的行与字段、两个版本戳分域、失败的条目保留待提交 (`collab/diff.spec.ts`)
-- **端到端测试 (CDP-driven)**：Node.js 原生 DevTools Protocol 驱动真实 Chrome，三阶段（发布 → 编辑者 → 管理员）共 145 项检查（任一阶段抛异常即判失败，不会被"跳过"吞掉）：
-  - **发布阶段**：无底图拦截、过期天数随请求走、底图字节预签名直传、confirm 用编辑密码切 ready、创建请求快照字段白名单；
+- **后端单元测试 (pytest)**：`uv run --directory backend pytest -q`，用 `httpx.AsyncClient` 直接打 ASGI 应用（每个用例一份临时数据目录），覆盖建房 / 进房 / 差量提交 / 版本冲突 / 越权 / 限流 / 过期 / 底图上传与下载 / 上限放宽 / 404 / 410 / 413 / 429。用例数以 `pytest -q` 的输出为准。
+- **端到端测试 (CDP-driven)**：`pnpm e2e` 一条命令拉起**真实的 FastAPI 后端**（临时数据目录，跑完即删）与一个临时 Vite dev server，再用 Node.js 原生 DevTools Protocol 驱动本机 Chrome 跑三个阶段（发布 → 编辑者 → 管理员）。三阶段打的是**同一个真实后端**：发布阶段建出来的房间号与两把密码透传给后两个阶段，所以它同时验证了前端、后端与两者之间的协议 —— 不再有页内 mock 后端（`src/dev/collabMock.ts` 已删除）。检查项数以 `pnpm e2e` 的输出为准。
+  - **发布阶段**（离线全功能 + 协同发布）：内置皮肤预加载与 UV 像素级核对、拖拽/缩放/旋转/图层顺序/批量导入/导出、无底图时发布被拦下、过期天数随请求走、底图走 multipart 上传到自己的后端（**预签名直传那条老路一次都没被调用**）、上传用编辑密码、房间被切成 `ready`、创建请求快照字段白名单；
   - **编辑者阶段**：布局锁四路拦截、PATCH 只带 `{id, skin, expectSkinUpdatedAt}`（协议不变性）、服务端位置原封未动、**皮肤戳前进而布局戳一动不动**、冲突只影响那一条并保留待提交、全量 PUT 一次都没被调用；
-  - **管理员阶段**：只有改动过的那一行进 PATCH、布局差量只带变了的字段（x/y）、新增走 `adds` 而非重发整间房、换底图不碰任何一行头像、删除房间后停留 gone 界面。
-  - 页内 mock 后端（`src/dev/collabMock.ts`）由 e2e 动态 import，生产构建被 tree-shake，不产生死体积。
+  - **管理员阶段**：只有改动过的那一行进 PATCH、布局差量只带变了的字段（x/y）、新增走 `adds` 而非重发整间房、换底图走 multipart 且不碰任何一行头像、删除房间后停在 gone 界面（服务端读回 404）。
+  - 每条检查都打印 PASS / FAIL / SKIP，任一阶段没产出结果即判失败（不会被 filter 悄悄吞掉），最后按失败数退出。
