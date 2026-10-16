@@ -179,6 +179,23 @@ if (isEditor) {
     mock.state.avatars.length + ' / ' + mock.state.avatars.map((a) => a.x).join(','));
   check('PUT 后 revision 前进', mock.state.revision > 3, String(mock.state.revision));
 
+  // —— 管理员换底图：走预签名直传 + 回执确认，再随全量同步落图层 ——
+  const swapBlob = await makePng(320, 200, '#009966');
+  await editorStore.setBaseImage(new File([swapBlob], '新底图.png', { type: 'image/png' }));
+  await sleep(600);
+  await collabStore.submitChanges();
+  await sleep(1500);
+  check('换底图后全量同步成功',
+    editor.notice && editor.notice.tone === 'success',
+    editor.notice && editor.notice.message);
+  check('新底图字节直传到了存储（绕过函数）',
+    mock.state.uploadedBytes > 1000, mock.state.uploadedBytes + ' bytes');
+  check('mock 底图信息已更新且仍为 ready',
+    // editor 存底图名时约定剥掉扩展名
+    mock.state.baseImage && mock.state.baseImage.name === '新底图' && mock.state.status === 'ready',
+    mock.state.baseImage ? mock.state.baseImage.name : '没有底图');
+  check('换底图后 revision 继续前进', mock.state.revision > 4, String(mock.state.revision));
+
   // —— 删除房间 ——
   await collabStore.removeRoom();
   await sleep(800);

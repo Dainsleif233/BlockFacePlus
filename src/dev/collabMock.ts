@@ -44,6 +44,11 @@ export interface CollabMockOptions {
   avatars?: MockAvatar[];
   /** 初始 revision（默认 3） */
   revision?: number;
+  /**
+   * 初始是否就绪。默认 true（直进房间的编辑者/管理员阶段用）；
+   * 发布自测阶段传 false，房间从 draft 起步，走真实的"上传→confirm→ready"生命周期。
+   */
+  startReady?: boolean;
 }
 
 export interface CollabMock {
@@ -58,6 +63,10 @@ export interface CollabMock {
     status: 'draft' | 'ready';
     revision: number;
     avatars: MockAvatar[];
+    /** 当前底图信息（换底图后更新） */
+    baseImage: { name: string; type: string; width: number; height: number; key?: string } | null;
+    /** 当前底图字节（直传后更新） */
+    baseBlob: Blob | null;
     deleted: boolean;
     uploadedBytes: number;
     /** PATCH 收到的最近一次 updates 原文 */
@@ -84,9 +93,11 @@ export function installCollabMock(options: CollabMockOptions): CollabMock {
   const state: CollabMock['state'] = {
     roomId: options.roomId,
     doc: { ...options.doc },
-    status: options.baseBlob ? 'ready' : 'draft',
+    status: options.startReady === false ? 'draft' : options.baseBlob ? 'ready' : 'draft',
     revision: options.revision ?? 3,
     avatars: (options.avatars ?? []).map((a) => ({ ...a })),
+    baseImage: options.baseImage ? { ...options.baseImage } : null,
+    baseBlob: options.baseBlob ?? null,
     deleted: false,
     uploadedBytes: 0,
     lastPatchUpdates: null,
@@ -96,7 +107,7 @@ export function installCollabMock(options: CollabMockOptions): CollabMock {
   const roomInfo = () => ({
     roomId: state.roomId,
     doc: state.doc,
-    baseImage: options.baseImage,
+    baseImage: state.baseImage,
     createdAt: Date.now() - 60_000,
     expiresAt: Date.now() + 7 * 24 * 3600 * 1000,
     revision: state.revision,
@@ -126,33 +137,11 @@ export function installCollabMock(options: CollabMockOptions): CollabMock {
   async function route(method: string, path: string, password: string | null, body: unknown, rawBody: RequestInit['body']): Promise<Response> {
     if (path === '/mock-upload' && method === 'PUT') {
       state.uploadedBytes = byteCount(rawBody);
+      if (rawBody instanceof Blob) state.baseBlob = rawBody; // 直传的字节落进"存储"，GET base 能取回
       return json({ ok: true });
     }
 
-        // ---- 创建房间（发布流程，集合路径没有 id 段） ----
-    if (method === 'POST' && path === '/api/rooms') {
-      const payload = body as { layers?: unknown[]; doc?: { width: number; height: number }; expiresDays?: number };
-      if (!payload || !Array.isArray(payload.layers) || payload.layers.length === 0) {
-        return json({ error: '至少先摆一个头像再发布' }, 400);
-      }
-      if (payload.expiresDays !== 3 && payload.expiresDays !== 7 && payload.expiresDays !== 14) {
-        return json({ error: '过期时间只认 3/7/14 天' }, 400);
-      }
-      return json({
-        roomId: state.roomId,
-        editPassword: options.editPassword,
-        adminPassword: options.adminPassword,
-        expiresAt: Date.now() + (payload.expiresDays ?? 7) * 24 * 3600 * 1000,
-        upload: { url: '/mock-upload', key: 'rooms/' + state.roomId + '/images/base.png', expiresAt: Math.floor(Date.now() / 1000) + 3600 },
-      });
-    }
-const match = path.match(/^\/api\/rooms\/([^/]+)(\/(avatars|base))?$/);
-    if (!match) return json({ error: 'mock 没实现这个路由：' + method + ' ' + path }, 404);
-    const [, id, tailRaw] = match;
-    const tail = tailRaw ? tailRaw.slice(1) : ''; // 捕获组带前导斜杠，剥掉统一比较
-    if (id !== state.roomId) return json({ error: 'mock 里没有这个房间' }, 404);
-
-    // ---- 创建房间（发布流程） ----
+    // ---- 创建房间（发布流程，集合路径没有 id 段，不要求密码） ----
     if (method === 'POST' && path === '/api/rooms') {
       const payload = body as { layers?: unknown[]; doc?: { width: number; height: number }; expiresDays?: number };
       if (!payload || !Array.isArray(payload.layers) || payload.layers.length === 0) {
@@ -172,7 +161,13 @@ const match = path.match(/^\/api\/rooms\/([^/]+)(\/(avatars|base))?$/);
         upload: { url: '/mock-upload', key: 'rooms/' + state.roomId + '/images/base.png', expiresAt: Math.floor(Date.now() / 1000) + 3600 },
       });
     }
+const match = path.match(/^\/api\/rooms\/([^/]+)(\/(avatars|base))?$/);
+    if (!match) return json({ error: 'mock 没实现这个路由：' + method + ' ' + path }, 404);
+    const [, id, tailRaw] = match;
+    const tail = tailRaw ? tailRaw.slice(1) : ''; // 捕获组带前导斜杠，剥掉统一比较
+    if (id !== state.roomId) return json({ error: 'mock 里没有这个房间' }, 404);
 
+    // ---- 创建房间（发布流程） ----
     if (state.deleted) return json({ error: '房间已删除' }, 410);
 
     const role = roleOf(password);
@@ -240,24 +235,39 @@ const match = path.match(/^\/api\/rooms\/([^/]+)(\/(avatars|base))?$/);
 
     // ---- 底图 ----
     if (method === 'GET' && tail === 'base') {
-      if (state.status !== 'ready' || !options.baseBlob) return json({ error: '底图还没就绪' }, 404);
-      return new Response(options.baseBlob, {
+      if (state.status !== 'ready' || !state.baseBlob) return json({ error: '底图还没就绪' }, 404);
+      return new Response(state.baseBlob, {
         status: 200,
         headers: {
-          'Content-Type': options.baseImage?.type ?? 'image/png',
-          'X-BF-Base-Name': encodeURIComponent(options.baseImage?.name ?? 'base.png'),
+          'Content-Type': state.baseImage?.type ?? 'image/png',
+          'X-BF-Base-Name': encodeURIComponent(state.baseImage?.name ?? 'base.png'),
         },
       } as ResponseInit);
     }
     if (method === 'POST' && tail === 'base') {
-      const payload = body as { intent?: string; type?: string; name?: string; width?: number; height?: number };
+      const payload = body as { intent?: string; type?: string; name?: string; key?: string; width?: number; height?: number };
       if (payload?.intent === 'sign') {
         if (role !== 'admin') return json({ error: '只有管理员能换底图' }, 403);
         return json({ upload: { url: '/mock-upload', key: 'rooms/' + state.roomId + '/images/base-' + Date.now() + '.png', expiresAt: Math.floor(Date.now() / 1000) + 600 } });
       }
       if (payload?.intent === 'confirm') {
+        // 草稿期编辑者密码可确认；房间就绪后只有管理员能换底图，且 key 必须来自 sign 发的直传键
+        if (state.status === 'ready') {
+          if (role !== 'admin') return json({ error: '只有管理员能更换底图' }, 403);
+          const roomPrefix = 'rooms/' + state.roomId + '/images/base-';
+          if (typeof payload.key !== 'string' || !payload.key.startsWith(roomPrefix)) {
+            return json({ error: '缺少待确认的底图' }, 400);
+          }
+        }
         state.status = 'ready';
         state.doc = { width: payload.width ?? state.doc.width, height: payload.height ?? state.doc.height };
+        state.baseImage = {
+          name: typeof payload.name === 'string' ? payload.name : state.baseImage?.name ?? '底图',
+          type: typeof payload.type === 'string' ? payload.type : state.baseImage?.type ?? 'image/png',
+          width: payload.width ?? state.doc.width,
+          height: payload.height ?? state.doc.height,
+          key: typeof payload.key === 'string' ? payload.key : state.baseImage?.key,
+        };
         state.revision += 1;
         return json({ ok: true, doc: state.doc, revision: state.revision });
       }

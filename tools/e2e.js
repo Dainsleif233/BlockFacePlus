@@ -403,6 +403,8 @@ const publishMock = installCollabMock({
   doc: { width: 320, height: 200 },
   baseImage: { name: '我的底图.png', type: 'image/png', width: 320, height: 200 },
   baseBlob: await new Promise((resolve) => baseCanvas.toBlob(resolve, 'image/png')),
+  // 发布自测从 draft 起步：走真实的"创建→直传→confirm(编辑密码)→ready"生命周期
+  startReady: false,
 });
 
 await collabStore.publishRoom(7);

@@ -97,8 +97,12 @@ setCollabHooks({
  * 进房 / 刷新
  * ------------------------------------------------------------------ */
 
+/** 载入时的底图 id：提交时对比判断管理员有没有换底图 */
+let baselineBaseId: string | null = null;
+
 function captureBaseline(): void {
   baselineSkin.value = new Map(editor.layers.map((l) => [l.id, l.skinId]));
+  baselineBaseId = editor.baseImageId;
   baselineStamp.clear();
 }
 
@@ -303,7 +307,38 @@ export async function submitChanges(): Promise<void> {
   }
   state.submitting = true;
   try {
-    await collabApi.putLayers(state.roomId, password, payload.layers, state.room.revision);
+    let revision = state.room.revision;
+    if (editor.baseImageId !== baselineBaseId) {
+      // 底图换过：先走预签名直传 + 回执确认；confirm 会推进 revision，图层同步要用新值
+      const sign = await collabApi.signBaseUpload(state.roomId, password, payload.baseImage.type);
+      const response = await fetch(sign.upload.url, {
+        method: 'PUT',
+        body: payload.baseFile,
+        headers: { 'Content-Type': payload.baseImage.type },
+      });
+      if (!response.ok) throw new Error(`底图上传失败（${response.status}）`);
+      const confirmed = await collabApi.confirmBase(state.roomId, password, {
+        key: sign.upload.key,
+        name: payload.baseImage.name,
+        type: payload.baseImage.type,
+        width: payload.baseImage.width,
+        height: payload.baseImage.height,
+      });
+      revision = confirmed.revision;
+      state.room = {
+        ...state.room,
+        doc: confirmed.doc,
+        baseImage: {
+          name: payload.baseImage.name,
+          type: payload.baseImage.type,
+          width: payload.baseImage.width,
+          height: payload.baseImage.height,
+        },
+        revision,
+      };
+      baselineBaseId = editor.baseImageId;
+    }
+    await collabApi.putLayers(state.roomId, password, payload.layers, revision);
     state.room = { ...state.room, revision: (await collabApi.getRoom(state.roomId, password)).room.revision };
     captureBaseline();
     notify('success', `已同步 ${payload.layers.length} 个头像到房间`);

@@ -54,10 +54,11 @@ function onDelete(): void {
     <span class="topbar__sep" aria-hidden="true" />
 
     <div class="actions">
-      <button v-if="!inRoom" class="bf-btn" type="button" :disabled="busy" @click="pick">
+      <!-- 房间内只有管理员能换底图；离线模式人人可换 -->
+      <button v-if="!inRoom || isAdmin" class="bf-btn" type="button" :disabled="busy" :title="inRoom ? '更换房间底图' : undefined" @click="pick">
         <i class="bf-ic bf-ic--open" aria-hidden="true"><b /><b /></i><span>打开<span class="btn-lbl--short">图片</span></span>
       </button>
-      <input v-if="!inRoom" ref="fileInput" class="bf-sr-only" type="file" accept="image/*" @change="onFile" />
+      <input v-if="!inRoom || isAdmin" ref="fileInput" class="bf-sr-only" type="file" accept="image/*" @change="onFile" />
 
       <button class="bf-btn btn--desktop-only" type="button" :disabled="busy" title="复制到剪贴板" @click="copyPng">
         <i class="bf-ic bf-ic--copy" aria-hidden="true"><b /><b /></i><span>复制图片</span>
