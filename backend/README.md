@@ -15,7 +15,7 @@ uv run uvicorn bfp.main:app --reload --port 8088
 
 ```bash
 curl http://127.0.0.1:8088/api/health   # {"ok":true,"version":"0.2.0"}
-curl http://127.0.0.1:8088/api/config   # 公开上限，前端启动时读一次
+curl http://127.0.0.1:8088/api/config   # 公开上限，供运维核对生效值（前端产物的预检阈值是构建期常量，见 src/core/collab/api.ts）
 ```
 
 也可以 `uv run python -m bfp` 自启（主机/端口取 `BF_HOST` / `BF_PORT`）。
