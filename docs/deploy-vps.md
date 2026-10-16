@@ -4,7 +4,7 @@
 > 接口、上限、错误码的**定义**在 [collab-api.md](collab-api.md)（冻结契约）；本文只回答「怎么把它跑起来」。
 > 所有命令都可以照抄 —— 需要替换的地方（域名、仓库地址、用户名）都写成了 `api.example.com` 这种显眼的样子。
 >
-> 部署形态：**一台普通 VPS 跑后端（uvicorn 只听回环，nginx 对外），前端静态产物留在边缘 Pages。**
+> 部署形态：**一台普通 VPS 跑后端（uvicorn 只听回环，由 nginx 或 Caddy 对外），前端静态产物留在边缘 Pages。**
 
 ```
 浏览器
@@ -12,8 +12,8 @@
   ├───────────────────────────────────▶│
   │  ② fetch https://api.example.com/api/...
   ▼
-nginx（TLS + client_max_body_size 256m + 透传 X-BF-Room-Pwd）
-  │  proxy_pass http://127.0.0.1:8088
+反向代理：nginx 或 Caddy（TLS + 请求体上限 ≥ 256MiB + 透传 X-BF-Room-Pwd）
+  │  转发到 http://127.0.0.1:8088（nginx 的 proxy_pass / Caddy 的 reverse_proxy）
   ▼
 uvicorn（FastAPI 应用，单进程）
   │
@@ -24,7 +24,7 @@ uvicorn（FastAPI 应用，单进程）
 ```
 
 **为什么这么拆**：底图与皮肤都是用户素材，单条最大可以到 128MiB（底图）与 32M 字符（内嵌皮肤），
-这种体量走云函数会一路撞平台硬限；放到自己的 VPS 上，限制只剩「磁盘」和「你愿意在 nginx 上放开多大请求体」。
+这种体量走云函数会一路撞平台硬限；放到自己的 VPS 上，限制只剩「磁盘」和「你愿意在反向代理上放开多大请求体」。
 静态产物留在边缘 Pages 则是因为它本来就该在那儿 —— 一个 CDN 就能解决的问题不必占用后端带宽。
 
 ---
@@ -48,6 +48,9 @@ sudo apt install -y git curl ca-certificates nginx sqlite3
 ```
 
 `sqlite3` 命令行不是运行时依赖，是给**备份**（`VACUUM INTO`）和**排错**（`PRAGMA integrity_check`、`.tables`）用的。
+
+这里装的是 nginx。想用 Caddy（自动申请 HTTPS，能整节省掉 5.2 的 certbot）的话，把 `nginx` 换成 `caddy`，
+或干脆不在这行装、按 5.5 从官方仓库装 —— 两者**只需要一个**，同时装会在 80 端口上打架。
 
 ### 1.2 建一个只跑服务的系统账号
 
@@ -134,11 +137,11 @@ sudo systemctl restart blockface-plus-api
 | :-- | :-- | :-- |
 | ★ `BF_DATA_DIR` | `./data` | SQLite 与底图的根目录。生产固定 `/var/lib/blockface-plus`，必须与 unit 里的 `StateDirectory=blockface-plus` 一致（systemd 就是按这个名字建目录并授权的）。放在代码目录里，迟早会被某次 `git clean` 或重新部署顺手带走。 |
 | ★ `BF_CORS_ORIGINS` | `*` | 逗号分隔的浏览器来源白名单，**只写 scheme+host+port，不带路径、不带结尾斜杠**。同一个 Pages 站点有多个域名（自定义域 + 平台域）就都写上。默认 `*` 只适合本机联调。 |
-| `BF_TRUSTED_HOSTS` | `*` | 允许的 Host 头，逗号分隔。走 nginx 时可以收成后端域名；守着 IP 直连 uvicorn 的场景才需要它。 |
+| `BF_TRUSTED_HOSTS` | `*` | 允许的 Host 头，逗号分隔。走反向代理（nginx / Caddy）时可以收成后端域名；守着 IP 直连 uvicorn 的场景才需要它。 |
 | `BF_MAX_LAYERS` | `10000` | 一间房最多多少行头像（旧版本 512）。这个值决定一次进房要读多少行，影响的是**进房速度**而不是容量。 |
 | `BF_MAX_SKIN_DATA_URL_CHARS` | `32000000` | 单条内嵌皮肤的 data URI 字符数。皮肤是内嵌在行里的，加大它等于加大数据库（与每次进房的响应体）。 |
-| `BF_MAX_BASE_IMAGE_BYTES` | `134217728`（128MiB） | 底图字节上限。**改大必须同步改 nginx 的 `client_max_body_size`**。 |
-| `BF_MAX_JSON_BODY_BYTES` | `268435456`（256MiB） | JSON 请求体上限（旧云函数版本受平台硬限只有 6MiB）。批量首刷几千行头像时它才是天花板；**同样受 nginx `client_max_body_size` 约束**。 |
+| `BF_MAX_BASE_IMAGE_BYTES` | `134217728`（128MiB） | 底图字节上限。**改大必须同步改反代的请求体上限**（nginx `client_max_body_size` / Caddy `request_body max_size`）。 |
+| `BF_MAX_JSON_BODY_BYTES` | `268435456`（256MiB） | JSON 请求体上限（旧云函数版本受平台硬限只有 6MiB）。批量首刷几千行头像时它才是天花板；**同样受反代请求体上限约束**。 |
 | `BF_MAX_DOC_SIZE` | `65536` | 画布边长上限。 |
 | `BF_MAX_POSITION` | `10000000` | 图层坐标绝对值上限。 |
 | `BF_MIN_LAYER_SIZE` / `BF_MAX_LAYER_SIZE` | `1` / `262144` | 图层尺寸区间。 |
@@ -181,7 +184,7 @@ journalctl -u blockface-plus-api -f              # 实时看日志
 journalctl -u blockface-plus-api -n 200 --since "-30min" --no-pager
 ```
 
-启动后先在**服务器本机**确认后端是活的（这一步不经过 nginx，能立刻把「后端问题」和「反代问题」分开）：
+启动后先在**服务器本机**确认后端是活的（这一步不经过反向代理，能立刻把「后端问题」和「反代问题」分开）：
 
 ```bash
 curl -s http://127.0.0.1:8088/api/health     # {"ok":true,"version":"..."}
@@ -204,7 +207,7 @@ sudo ls -ld /var/lib/blockface-plus /var/lib/blockface-plus/base
   藏掉 `$HOME` 等于把解释器一起藏掉，服务会以「找不到文件」起不来。`read-only` 保留了可读、仍然禁止乱写。
   （想用 `ProtectHome=true` 也行：把 `UV_PYTHON_INSTALL_DIR` 指到 `/var/cache/blockface-plus/python`，
   并在第 2 节 `uv sync` 时用同一个变量，让运行期和安装期看到同一份解释器。）
-- **`listen 127.0.0.1` + `--workers 1`**：前者让 uvicorn 只对回环开放，对外只有 nginx 一个入口。
+- **`listen 127.0.0.1` + `--workers 1`**：前者让 uvicorn 只对回环开放，对外只有反向代理一个入口。
   后者是刻意的：一个 worker 就是一个进程，房里的写路径全靠"单进程内单连接 + 应用层写锁"把并发写消掉
   （见 `backend/src/bfp/db.py`）。多开 worker 后，跨进程的写确实还有数据库层的 `BEGIN IMMEDIATE` +
   `busy_timeout` 兜着，但读-改-写序列会多出真实的等待与超时可能（日志里的 `database is locked` 就是这么来的），
@@ -220,7 +223,10 @@ sudo ls -ld /var/lib/blockface-plus /var/lib/blockface-plus/base
 
 ---
 
-## 5. nginx 反向代理
+## 5. 反向代理（nginx 或 Caddy，二选一）
+
+下面 5.1～5.4 是 nginx 那条路。**想省掉 certbot 就直接跳到 5.5** ——
+Caddy 的配置更短、证书自动续期，代价是它的几处默认值与 nginx 相反（样例文件里逐条写了）。
 
 ```bash
 sudo install -m 0644 deploy/nginx-blockface-plus.conf /etc/nginx/sites-available/blockface-plus.conf
@@ -258,6 +264,9 @@ certbot 会自己改写这份配置（加 443 的 server 块、填证书路径�
 之后自动续期由它装的 systemd timer 负责。后端**不需要任何改动**：它照旧只听回环的明文 HTTP，
 TLS 在 nginx 这一层终止，`X-Forwarded-Proto` 就是告诉后端「对外其实是 https」的那一行。
 
+> 用 Caddy 的话**这一整节跳过**：证书是它自己申请的，没有 certbot、没有定时器、也没有需要手填的证书路径。
+> 见 5.5。
+
 ### 5.3 验证反代与跨域
 
 ```bash
@@ -277,7 +286,7 @@ curl -si -X OPTIONS https://api.example.com/api/rooms \
 ### 5.4 替代方案：同源部署（一个域名既发前端又反代 /api）
 
 跨域是要付代价的：多一次 preflight、CSP 要多放行一个来源、密码头要跨域。
-如果这个项目基本只有你自己用，最省事的是让 nginx 直接托管前端产物、同域转发 `/api`：
+如果这个项目基本只有你自己用，最省事的是让反向代理直接托管前端产物、同域转发 `/api`：
 
 ```bash
 # 本地构建，把 dist/ 传上去（VITE_API_BASE_URL 留空 = 同源）
@@ -285,7 +294,9 @@ pnpm build
 rsync -av --delete dist/ blockface@你的服务器:/srv/blockface-plus-web/dist/
 ```
 
-nginx 侧用样例文件末尾那段注释里的 server 块（`root` + `try_files ... /index.html` + `location /api/`）。
+nginx 侧用 `deploy/nginx-blockface-plus.conf` 末尾那段注释里的 server 块
+（`root` + `try_files ... /index.html` + `location /api/`）；Caddy 侧用 `deploy/caddy-blockface-plus.conf`
+末尾那段同源配置（`root` + `file_server` + `try_files {path} /index.html`）。
 此时：
 
 - `BF_CORS_ORIGINS` 不再是必需项（同源请求不触发 CORS），但**别把它设成 `*` 就以为万事大吉**，
@@ -293,6 +304,46 @@ nginx 侧用样例文件末尾那段注释里的 server 块（`root` + `try_file
 - 前端构建**不要**设 `VITE_API_BASE_URL`；
 - 前端换了新版本要记得同步 `index.html` 与 `assets/`（`--delete` 会清掉旧文件），
   否则浏览器拿着旧壳子去请求已删除的带 hash 资源，表现为白屏。
+
+### 5.5 替代：Caddy（自动 HTTPS，配置更短）
+
+nginx 那条路要装 certbot、要等它改写配置、要指望它的续期定时器。Caddy 把整摊吃掉了 ——
+域名解析对上、80/443 能连，证书它自己去申请并续期。样例在 `deploy/caddy-blockface-plus.conf`，
+**与 nginx 那份二选一**，别两个都装（会在 80 端口上打架）。
+
+```bash
+# 装（发行版自带源里的 caddy 往往偏旧，用官方仓库）
+sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt update && sudo apt install -y caddy
+
+sudo install -m 0644 deploy/caddy-blockface-plus.conf /etc/caddy/Caddyfile
+sudoedit /etc/caddy/Caddyfile                  # 改 api.example.com 与 ACME 邮箱
+caddy validate --config /etc/caddy/Caddyfile   # 先验语法，再动线上
+sudo install -d -o caddy -g caddy -m 0750 /var/log/caddy   # 样例开了文件访问日志，目录要先有
+sudo systemctl reload caddy
+```
+
+装完 `https://api.example.com/api/health` 就该通了，**不需要再装 certbot**，5.2 整节跳过。
+
+三处默认行为与 nginx 相反，样例文件里每条都写了理由，这里只列结论：
+
+1. **请求体默认没有上限。** nginx 要显式 `client_max_body_size 256m` 去放宽，Caddy 反过来 ——
+   它默认不限，样例里那句 `request_body { max_size 536870912 }` 是**主动收紧**，不是放开。
+   它同样必须 ≥ `BF_MAX_JSON_BODY_BYTES`；比后端小的话，413 就来自 Caddy 而不是后端。
+2. **请求体默认不缓冲。** 对应 nginx 的 `proxy_request_buffering off`，Caddy 不需要配。
+3. **访问日志默认会把请求头整份记下来**（nginx 默认不记），而密码就在 `X-BF-Room-Pwd` 里。
+   样例用 `format filter` 把 `request.headers` 删掉再写文件。**你要改这段日志配置的话，记得别把密码写进磁盘。**
+   验证只要一句：
+
+```bash
+# 先随便访问一次带密码的接口，再确认日志里搜不到那个头
+sudo grep -c 'x-bf-room-pwd' /var/log/caddy/blockface-plus.access.log   # 期望 0
+```
+
+反代起来之后，5.3 的 curl 验证、5.4 的同源部署（样例文件末尾也给了 Caddy 版）、以及第 6 节往后的
+边缘 Pages 部分**都不变**。
 
 ---
 
@@ -332,7 +383,7 @@ pnpm build
 
 - **(a) 跨域直连 VPS**：构建时设 `VITE_API_BASE_URL=https://api.example.com`，
   同时把 Pages 的域名填进后端 `BF_CORS_ORIGINS`（注意事项见 6.3）；
-- **(b) 同源反代**：不设这个变量，由边缘 Pages 或 nginx 把 `/api` 反代到 `127.0.0.1:8088`（做法见 5.4）。
+- **(b) 同源反代**：不设这个变量，由边缘 Pages 或 nginx / Caddy 把 `/api` 反代到 `127.0.0.1:8088`（做法见 5.4）。
 
 设了变量却按同源部署 → 请求会直接打到 `https://api.example.com`（此时必须已经配好 CORS 与 TLS）；
 不设变量却按跨域部署 → 请求会打到 Pages 自己的 `/api` 上，得到 404。
@@ -357,8 +408,9 @@ pnpm build
   所以**改了后端地址一定要重新构建**，否则产物里的 CSP 还停在旧域名上。
   被 CSP 拦下的表现是控制台明确写出 `Content Security Policy` 字样，和 CORS 报错长得不一样，别混。
 - **preflight 是省不掉的**：密码走自定义请求头 `X-BF-Room-Pwd`，跨域时浏览器一定会先发一次 `OPTIONS`。
-  不要去 nginx 上给 `OPTIONS` 加长时间缓存 —— 这里没有值得省的东西。
-- **别把密码塞进 URL**：契约规定密码只走请求头，既是为了不进 nginx access_log，也是为了不留在浏览器历史里。
+  不要去反向代理上给 `OPTIONS` 加长时间缓存 —— 这里没有值得省的东西。
+- **别把密码塞进 URL**：契约规定密码只走请求头，既是为了不进反向代理的 access_log，也是为了不留在浏览器历史里。
+  （Caddy 的访问日志尤其要留意：它默认会把请求头整份记下来，样例里用 `format filter` 删掉了，见 5.5。）
 
 ---
 
@@ -473,20 +525,20 @@ journalctl -u blockface-plus-api -n 50 --no-pager
 ### 8.1 状态码对照
 
 先记住一件事：**错误响应体统一是 `{"error": "<中文人话>"}`**（契约 §1）。
-拿到响应体就能知道原因，拿到的是 nginx 的纯文本 HTML/文本，说明请求根本没到后端。
+拿到响应体就能知道原因；拿到的是一段纯文本或反代自己的错误页，说明请求根本没到后端。
 
 | 状态码 | 含义 | 该查什么 / 怎么调 |
 | :-- | :-- | :-- |
 | `400` | 入参不合法（房间号格式、过期天数超范围、缺字段） | 看错误文案里点了哪个字段；批量提交时先确认前端没把密码塞进 query |
-| `401` | 密码不对 | ① 密码分大小写、不含 `0/1/l/o`，别让人为抄错背锅；② 用 `curl -H 'X-BF-Room-Pwd: ...'` 直连 `127.0.0.1:8088` 排除 nginx/CDN 丢头；③ 确认浏览器发的是 `X-BF-Room-Pwd` 而不是别的名字 |
+| `401` | 密码不对 | ① 密码分大小写、不含 `0/1/l/o`，别让人为抄错背锅；② 用 `curl -H 'X-BF-Room-Pwd: ...'` 直连 `127.0.0.1:8088` 排除反代/CDN 丢头；③ 确认浏览器发的是 `X-BF-Room-Pwd` 而不是别的名字 |
 | `403` | 角色不够（编辑者动了布局、动了增删，或非管理员想删房/换底图） | 这是**设计如此**，不是 bug：编辑密码只能换皮肤。管理动作要用创建响应里那次给出的管理员密码 |
 | `404` | 房间不存在（房间号写错，或房间已被彻底删除） | `bfp-ops list` 看看这个房间号到底在不在；不在就是已经被删/从未创建 |
 | `409` | 状态未就绪 / 版本冲突 | 房间还是草稿态却去取底图 → 发布流程没走完；差量提交拿到 `409` 说明某几行被别人改过，客户端应把这几行留在「待提交」里重试 |
 | `410` | 房间已过期 | 过期是**惰性**生效的：谁来读谁触发删除。想让数据尽快消失就调小 `BF_SWEEP_INTERVAL_SECONDS`，或手工 `bfp-ops sweep` |
-| `413` | 体积超限 | **先看响应体**：JSON 的错误来自后端 `BF_MAX_*_BYTES`；纯文本来自 nginx `client_max_body_size`。两个值要一起改 |
+| `413` | 体积超限 | **先看响应体**：JSON 的错误来自后端 `BF_MAX_*_BYTES`；纯文本来自反向代理的请求体上限（nginx `client_max_body_size` / Caddy `request_body max_size`）。两个值要一起改 |
 | `429` | 密码试错太频繁 | 按**房间**计数（不是按 IP）。默认 60 秒窗口 20 次失败。先 `bfp-ops inspect <房间号>` 看锁到什么时候；再决定是调 `BF_AUTH_WINDOW_SECONDS` / `BF_AUTH_MAX_FAILS`（调大更抗「抄错密码」，调小更抗「暴力猜」），还是就地解锁（见下表后的说明）。注意副作用 —— 知道房间号的人可以故意刷失败把房主挡在门外一个窗口，这是拿可用性换安全性的取舍 |
 | `500` | 后端内部错误 | `journalctl -u blockface-plus-api -n 200`；先怀疑数据目录不可写（`ls -ld /var/lib/blockface-plus`） |
-| `502 / 504` | nginx 连不上后端 | `systemctl status blockface-plus-api`、`sudo ss -ltnp \| grep 8088`；启动了又立刻退出，通常看 `journalctl` 里是不是 `No such file or directory`（解释器/路径问题） |
+| `502 / 504` | 反向代理连不上后端（Caddy 是 `502` + 一条 upstream 日志） | `systemctl status blockface-plus-api`、`sudo ss -ltnp \| grep 8088`；启动了又立刻退出，通常看 `journalctl` 里是不是 `No such file or directory`（解释器/路径问题） |
 
 **房主被自己的房间挡在门外（429）怎么就地解锁**：限流状态是 SQLite 里的一行，每个鉴权请求都现读，
 所以删掉它立刻生效、不需要重启服务：
@@ -505,9 +557,12 @@ sudo -u blockface sqlite3 /var/lib/blockface-plus/bfp.sqlite3 \
   改了 `api.env` 记得 `systemctl restart`。
 - **浏览器报 CSP 拦截**：产物是在设 `VITE_API_BASE_URL` 之前构建的 —— 重新 `pnpm build`。
 - **一直 401 但密码没错**：中间层把 `X-BF-Room-Pwd` 吃掉了。用 5.3 的 curl 直连域名试一次、
-  再直连 `127.0.0.1:8088` 试一次，就能定位是 nginx 之后还是之前的问题。
-- **大底图传到一半失败**：三处都要看 —— nginx `client_max_body_size`、
-  `proxy_request_buffering off` 有没有生效、后端 `BF_MAX_BASE_IMAGE_BYTES`。
+  再直连 `127.0.0.1:8088` 试一次，就能定位是反向代理之后还是之前的问题。
+- **大底图传到一半失败**：三处都要看 —— 反代的请求体上限（nginx `client_max_body_size` /
+  Caddy `request_body max_size`）、反代有没有把请求体缓冲到磁盘（nginx 要 `proxy_request_buffering off`，
+  Caddy 默认就不缓冲）、后端 `BF_MAX_BASE_IMAGE_BYTES`。
+- **Caddy 起不来，或证书一直申请失败**：`journalctl -u caddy -n 100`。多半是域名没解析到这台机器、
+  80/443 没放行，或者 80 端口被 nginx 占着（两份配置同时装就会这样）。
 - **磁盘长得比预期快**：房间是过期的但清扫被关了（`BF_SWEEP_INTERVAL_SECONDS=0`），
   或者有人传了超大底图。先 `bfp-ops list` 看有哪些房、谁过期了，再 `bfp-ops inspect <房间号>`
   看那间房的底图占了多少字节（`list` 只有房间级别的清单，不含体积），最后 `bfp-ops sweep` 清一轮。
@@ -522,7 +577,9 @@ sudo -u blockface sqlite3 /var/lib/blockface-plus/bfp.sqlite3 \
 - [ ] `curl -s http://127.0.0.1:8088/api/config` 里的数字与 `api.env` 一致（证明环境变量真读到了）
 - [ ] `https://api.example.com/api/health` 通，且 `systemctl enable` 过（重启机器后能自己起来）
 - [ ] `BF_CORS_ORIGINS` 写的是 Pages 的真实域名（不是 `*`）
-- [ ] nginx `client_max_body_size` ≥ `BF_MAX_JSON_BODY_BYTES` 与 `BF_MAX_BASE_IMAGE_BYTES`
+- [ ] 反向代理的请求体上限 ≥ `BF_MAX_JSON_BODY_BYTES` 与 `BF_MAX_BASE_IMAGE_BYTES`
+      （nginx `client_max_body_size` / Caddy `request_body max_size`）
+- [ ] 若用 Caddy：`caddy validate --config /etc/caddy/Caddyfile` 通过，且 access log 里搜不到 `x-bf-room-pwd`
 - [ ] 浏览器里能走完一次「发布房间 → 换密码进房 → 换个皮肤 → 提交」全流程
 - [ ] 备份 cron 装好，并且**真的手工执行过一次恢复演练**（没演练过的备份等于没有备份）
 - [ ] `journalctl -u blockface-plus-api` 里没有反复出现的异常栈

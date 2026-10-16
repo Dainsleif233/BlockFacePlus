@@ -21,7 +21,7 @@
   - **管理员密码**可自由改动布局（挪动/缩放/旋转/增删/改名）、更换底图与删除房间；提交是**差量**的：只发改动过的行与字段，按域比对版本（改布局只比布局戳、换内容只比内容戳），冲突只影响那一条，不会把整次提交打回；
   - 数据落 SQLite（WAL）：房间 / 头像行 / 底图指针各成一张表，布局字段与皮肤字段的版本戳分域，谁也覆盖不了谁刚写的东西；
   - 房间可选 3 / 7 / 14 / 30 / 90 天过期，到期连同全部内容自动清理（读到即惰性过期 + 后台定时清扫，不靠谁记得去点一下）；
-  - 底图字节直接上传到自建后端、落在本地文件系统，没有预签名直传也没有第三方对象存储，体积上限只取决于你愿意在 nginx 上放开多大请求体。
+  - 底图字节直接上传到自建后端、落在本地文件系统，没有预签名直传也没有第三方对象存储，体积上限只取决于你愿意在反向代理（nginx 或 Caddy）上放开多大请求体。
 - 🧩 **多源素材与通用图片支持**：
   - 内置经典 Steve / Alex 皮肤，开箱即选；
   - 支持正版 Minecraft 玩家 ID 单个或批量检索；
@@ -93,7 +93,7 @@ uv run --directory backend uvicorn bfp.main:app --reload --port 8088
 pnpm dev
 ```
 
-生产部署（VPS 上的 systemd + nginx、SQLite 备份、边缘 Pages 发布）见
+生产部署（VPS 上的 systemd + 反向代理（nginx 或 Caddy）、SQLite 备份、边缘 Pages 发布）见
 [**VPS 部署指南**](docs/deploy-vps.md)；接口、上限与错误码见
 [**协同后端 API 契约**](docs/collab-api.md)。
 
@@ -180,7 +180,7 @@ BlockFace+ 界面采用严格的 **8px 积木网格（Blockgrid）** 体系：
 - [技术设计与实现要点 (Product & Technical Facts)](docs/product-facts.md)：Mojang API 限制、皮肤 UV 贴图算法、画布坐标系与视口变换数学、协同房间数据架构、LRU 显存缓存与历史保护。
 - [界面需求规格说明 (Design Spec)](docs/design-spec.md)：产品定位、信息架构、协同房间与交互规格。
 - [协同后端 API 契约 (Collab API)](docs/collab-api.md)：端点、请求/响应结构、错误码与全部可调上限。**这是冻结契约**，前端、后端、e2e 与部署文档都以它为准。
-- [VPS 部署指南 (Deploy on VPS)](docs/deploy-vps.md)：从零装 uv、systemd 常驻、nginx 反代与 HTTPS、SQLite 备份与 `bfp-ops`、以及边缘 Pages 的构建与发布。
+- [VPS 部署指南 (Deploy on VPS)](docs/deploy-vps.md)：从零装 uv、systemd 常驻、反向代理与 HTTPS（[nginx 样例](deploy/nginx-blockface-plus.conf) + 自动 HTTPS 的 [Caddy 样例](deploy/caddy-blockface-plus.conf)，二选一）、SQLite 备份与 `bfp-ops`、以及边缘 Pages 的构建与发布。
 
 ---
 

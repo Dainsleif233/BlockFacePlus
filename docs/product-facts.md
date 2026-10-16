@@ -95,7 +95,7 @@ view.y = view.y + offset.y * (1 - k) + (size.height * (k - 1)) / 2;
 
 - 三个索引各对应一条访问路径：`idx_rooms_expires_at(expires_at)` 与 `idx_room_base_status(status)` 给清扫用（按过期时间捞房间、按状态捞草稿房），`idx_avatars_order(room_id, order_index)` 给进房用（按 `order` 升序取整间房的头像行）。注意落库列名是 `order_index` —— `order` 是 SQL 关键字，对外（JSON 与前端类型）仍然是 `order`，写运维 SQL 时别找错列。
 - **为什么拆表**：更早的版本把底图指针、画布尺寸、房间状态与版本号塞在同一份房间元信息里整份回写，后写的那次必然带着自己开头读到的旧快照，把先写的成果覆盖掉 —— 实测能造出「底图指向一个已经被删掉的文件、房间永久打不开」。现在三件事落在互不重叠的表/列上，覆盖从根上不可能发生：`(room_id, id)` 主键就是当年「一个头像一个键」的等价物；布局补丁只 `UPDATE` 布局列，皮肤提交只 `UPDATE` 皮肤列。
-- 上限不再由平台决定：旧版受云函数请求体 6MiB 与挂钟 120 秒的硬限，现在只剩磁盘，以及你愿意在 nginx 上放开多大的请求体（默认值见 4.7）。
+- 上限不再由平台决定：旧版受云函数请求体 6MiB 与挂钟 120 秒的硬限，现在只剩磁盘，以及你愿意在反向代理（nginx / Caddy）上放开多大的请求体（默认值见 4.7）。
 
 ### 4.2 头像记录与内嵌皮肤格式
 - 单条头像记录（`RoomAvatarRecord`）：`id / name / x / y / size / rotation / opacity / overlay / flipH / visible / order / skin / skinUpdatedAt / layoutUpdatedAt`。`order` 决定图层顺序（0 在最底层）；两个版本戳都是服务端生成的并发凭证，**各管各的域**：换皮肤只比对 `skinUpdatedAt`，挪位置只比对 `layoutUpdatedAt`。

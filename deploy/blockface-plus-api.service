@@ -14,7 +14,8 @@
 #   3. uv 与 uvicorn 的路径和下面 ExecStart / Environment 一致。
 #
 # 这份 unit 刻意不监听 0.0.0.0：uvicorn 不做 TLS、不做限速、不托管静态文件，
-# 让它只听回环、由 nginx 对外，是把「谁能碰到这个进程」收成一个点的最省心做法。
+# 让它只听回环、由反向代理（nginx 或 Caddy，两份样例都在 deploy/）对外，是把「谁能碰到这个进程」
+# 收成一个点的最省心做法。
 
 [Unit]
 Description=BlockFace+ 协同后端 (FastAPI / uvicorn)
