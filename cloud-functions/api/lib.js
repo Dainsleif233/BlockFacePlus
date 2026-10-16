@@ -400,7 +400,14 @@ export async function deleteRoom(roomId) {
   await s.delete(throttleKey(roomId)).catch(() => {});
 }
 
-/** 顺带清理：把索引里已过期的房间连锅端掉（惰性过期 + 创建时摊销清扫） */
+/**
+ * 顺带清理：把索引里已过期的房间连锅端掉（惰性过期 + 创建时摊销清扫）。
+ *
+ * 判过期**以 meta 为准**，索引只是线索：索引是二手记录，一旦它的 expiresAt 口径不对
+ * （比如被写成秒而不是毫秒），按它删就会把一间活着的房间连图带头像全清掉——
+ * 这个坑实测可复现。meta 读不到时才退回按索引判断，那是"索引还在、房间本体已经没了"
+ * 的残渣，清掉正好。
+ */
 export async function sweepExpiredRooms(now = Date.now()) {
   const s = await store();
   // 清扫是建房时捎带的摊销任务：单页 + 截断，一次最多看 24 个索引，
@@ -416,11 +423,16 @@ export async function sweepExpiredRooms(now = Date.now()) {
       }
     }),
   );
-  const expired = entries
-    .filter((entry) => entry && typeof entry.roomId === 'string' && isExpired(entry, now))
-    .map((entry) => entry.roomId);
-  await Promise.all(expired.map((roomId) => deleteRoom(roomId).catch(() => {})));
-  return expired.length;
+  const rooms = entries.filter((entry) => entry && typeof entry.roomId === 'string').map((entry) => entry.roomId);
+  const expired = await mapLimit(rooms, 16, async (roomId) => {
+    const meta = await getRoomMeta(roomId).catch(() => null);
+    if (meta) return isExpired(meta, now) ? roomId : null;
+    const entry = entries.find((e) => e && e.roomId === roomId);
+    return isExpired(entry, now) ? roomId : null;
+  });
+  const doomed = expired.filter(Boolean);
+  await Promise.all(doomed.map((roomId) => deleteRoom(roomId).catch(() => {})));
+  return doomed.length;
 }
 
 /**
