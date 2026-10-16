@@ -43,15 +43,25 @@ async function parseError(response: Response): Promise<CollabApiError> {
   return new CollabApiError(response.status, message, payload);
 }
 
-async function request<T>(method: string, path: string, options: { password?: string; body?: unknown } = {}): Promise<T> {
+async function request<T>(
+  method: string,
+  path: string,
+  options: { password?: string; body?: unknown; maxChars?: number } = {},
+): Promise<T> {
   const headers: Record<string, string> = {};
   if (options.password) headers[PASSWORD_HEADER] = options.password;
   if (options.body !== undefined) headers['Content-Type'] = 'application/json';
+  const serialized = options.body === undefined ? undefined : JSON.stringify(options.body);
+  // 体积预检：整间房一次性提交没有分块能力，超了服务端只会回 413，
+  // 与其让人对着「请求体太大」发愣，不如在这里先说人话
+  if (serialized !== undefined && options.maxChars !== undefined && serialized.length > options.maxChars) {
+    throw new CollabApiError(413, oversizeMessage(serialized.length, options.maxChars));
+  }
 
   const response = await fetch(path, {
     method,
     headers,
-    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    body: serialized,
   });
   if (!response.ok) throw await parseError(response);
   return (await response.json()) as T;
@@ -59,7 +69,7 @@ async function request<T>(method: string, path: string, options: { password?: st
 
 export const collabApi = {
   createRoom(payload: CreateRoomPayload): Promise<CreateRoomResult> {
-    return request('POST', '/api/rooms', { body: payload });
+    return request('POST', '/api/rooms', { body: payload, maxChars: MAX_FULL_SUBMIT_CHARS });
   },
 
   getRoom(roomId: string, password: string): Promise<RoomSnapshot> {
@@ -79,6 +89,7 @@ export const collabApi = {
     return request('PUT', `/api/rooms/${encodeURIComponent(roomId)}`, {
       password,
       body: { layers, ...(ifRevision === undefined ? {} : { ifRevision }) },
+      maxChars: MAX_FULL_SUBMIT_CHARS,
     });
   },
 
@@ -128,6 +139,31 @@ export const collabApi = {
 
 /** 单次增量提交的体积上限（字符数）：云函数请求体上限 6MB，留出余量 */
 export const MAX_PATCH_CHARS = 4_000_000;
+
+/**
+ * 整间房一次性提交的体积上限：与后端 readJsonBody 的默认值（5M 字符）对齐。
+ * 建房和管理员全量同步都是"一次把整间房发过去"，没有分块能力，超了就是 413。
+ */
+export const MAX_FULL_SUBMIT_CHARS = 5 * 1024 * 1024;
+
+function oversizeMessage(chars: number, limit: number): string {
+  return `整间房的内容约 ${formatBytes(chars)}，超过单次提交的 ${formatBytes(limit)} 上限：减掉几张头像，或把自定义图压小再发布`;
+}
+
+/**
+ * 整间房一次性提交的体积预检：超了返回一句人话，没问题返回 null。
+ * 调用方两个地方：发布对话框点"发布"之前、管理员全量同步换底图之前 ——
+ * 后者尤其要早查，否则底图已经换掉了才崩在图层那一步。
+ */
+export function fullSubmitTooLarge(payload: unknown, limit = MAX_FULL_SUBMIT_CHARS): string | null {
+  let chars = 0;
+  try {
+    chars = JSON.stringify(payload)?.length ?? 0;
+  } catch {
+    return null; // 序列化都失败的话交给真正的请求去报错，别在这儿吞掉
+  }
+  return chars > limit ? oversizeMessage(chars, limit) : null;
+}
 
 /** 单次增量提交的条数上限：与后端 MAX_PATCH_UPDATES 对齐，超过直接 400 */
 export const MAX_PATCH_UPDATES = 64;

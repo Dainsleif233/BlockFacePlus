@@ -3,8 +3,8 @@
  * Copyright 2026 Dainsleif · Apache License 2.0
  */
 
-import { describe, expect, it } from 'vitest';
-import { chunkUpdates } from './api';
+import { describe, expect, it, vi } from 'vitest';
+import { MAX_FULL_SUBMIT_CHARS, chunkUpdates, collabApi, fullSubmitTooLarge } from './api';
 import type { AvatarUpdate } from './types';
 
 function update(index: number, bodyChars: number): AvatarUpdate {
@@ -55,5 +55,44 @@ describe('chunkUpdates', () => {
     const chunks = chunkUpdates([update(1, 100), big, update(2, 100)], 1000);
     expect(chunks).toHaveLength(3);
     expect(chunks.flat().map((u) => u.id)).toEqual(['layer-1', 'layer-99', 'layer-2']);
+  });
+});
+
+describe('fullSubmitTooLarge', () => {
+  it('默认上限与后端 readJsonBody 的默认值一致', () => {
+    expect(MAX_FULL_SUBMIT_CHARS).toBe(5 * 1024 * 1024);
+  });
+
+  it('没超就放行', () => {
+    expect(fullSubmitTooLarge({ layers: [update(1, 100)] }, 10_000)).toBeNull();
+  });
+
+  it('正好等于上限也放行（后端判的是 > 上限）', () => {
+    const limit = 200;
+    const body = { a: 'x'.repeat(limit - 8) }; // {"a":"…"} = 6 + n + 2
+    expect(JSON.stringify(body)).toHaveLength(limit);
+    expect(fullSubmitTooLarge(body, limit)).toBeNull();
+  });
+
+  it('超了给一句人话，不是把 413 甩给用户', () => {
+    const message = fullSubmitTooLarge({ layers: [update(1, 6_000_000)] });
+    expect(message).toBeTruthy();
+    expect(message).toContain('上限');
+    expect(message).toContain('减掉几张头像');
+  });
+
+  it('序列化不了的内容不在这里吞掉（交给真正的请求去报错）', () => {
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    expect(fullSubmitTooLarge(cyclic)).toBeNull();
+  });
+
+  it('体积超限时请求层直接抛 413，一个字节都不发出去', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const big = [{ skin: { dataUrl: 'data:image/png;base64,' + 'A'.repeat(MAX_FULL_SUBMIT_CHARS) } }];
+    await expect(collabApi.putLayers('room1', 'pw', big, 1)).rejects.toMatchObject({ status: 413 });
+    expect(fetchMock).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
   });
 });

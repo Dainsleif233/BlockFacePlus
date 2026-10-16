@@ -11,7 +11,7 @@
  */
 
 import { computed, reactive, shallowRef } from 'vue';
-import { CollabApiError, MAX_BASE_IMAGE_BYTES, chunkUpdates, collabApi, formatBytes } from '../core/collab/api';
+import { CollabApiError, MAX_BASE_IMAGE_BYTES, chunkUpdates, collabApi, formatBytes, fullSubmitTooLarge } from '../core/collab/api';
 import * as session from '../core/collab/session';
 import type { AvatarUpdate, RoomInfo, RoomRole } from '../core/collab/types';
 import {
@@ -326,6 +326,12 @@ export async function submitChanges(): Promise<void> {
     notify('error', `有 ${payload.failedSkins} 个头像的皮肤无法编码，请先换掉再提交`);
     return;
   }
+  // 先量体积再动手：这一步之后紧接着就是换底图，别等底图传完了才发现图层整批发不过去
+  const oversize = fullSubmitTooLarge({ layers: payload.layers, ifRevision: state.room.revision });
+  if (oversize) {
+    notify('error', oversize);
+    return;
+  }
   state.submitting = true;
   try {
     let revision = state.room.revision;
@@ -455,6 +461,18 @@ export async function publishRoom(expiresDays: number): Promise<void> {
   const tooLarge = baseTooLarge(payload.baseFile);
   if (tooLarge) {
     publish.error = tooLarge;
+    return;
+  }
+
+  // 建房是"一次把整间房发过去"，没有分块能力：体积超了服务端只会回 413，这里提前说清楚
+  const oversize = fullSubmitTooLarge({
+    doc: payload.doc,
+    baseImage: payload.baseImage,
+    layers: payload.layers,
+    expiresDays,
+  });
+  if (oversize) {
+    publish.error = oversize;
     return;
   }
 
