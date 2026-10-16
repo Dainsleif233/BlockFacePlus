@@ -83,7 +83,14 @@ interface EditorState {
   layers: AvatarLayer[];
   selectedId: string | null;
   /** 画布视图：缩放倍率 + 平移（屏幕像素）。它只是"看得方便"，不属于文档内容，所以不进历史 */
-  view: { zoom: number; autoFit: boolean; x: number; y: number };
+  view: {
+    zoom: number;
+    autoFit: boolean;
+    x: number;
+    y: number;
+    viewportWidth: number;
+    viewportHeight: number;
+  };
   busy: string | null;
   notice: Notice | null;
   showGrid: boolean;
@@ -103,7 +110,7 @@ const state = reactive<EditorState>({
   activeSkinId: null,
   layers: [],
   selectedId: null,
-  view: { zoom: 1, autoFit: true, x: 0, y: 0 },
+  view: { zoom: 1, autoFit: true, x: 0, y: 0, viewportWidth: 960, viewportHeight: 620 },
   busy: null,
   notice: null,
   showGrid: false,
@@ -298,8 +305,60 @@ function clampSize(size: number): number {
   return Math.round(Math.min(maxLayerSize.value, Math.max(MIN_LAYER_SIZE, size)));
 }
 
-function defaultLayerSize(): number {
-  return clampSize(Math.min(state.document.width, state.document.height) * 0.4);
+export function setViewportSize(width: number, height: number): void {
+  if (width > 0 && height > 0) {
+    state.view.viewportWidth = Math.round(width);
+    state.view.viewportHeight = Math.round(height);
+  }
+}
+
+export function getFitScale(
+  docWidth = state.document.width,
+  docHeight = state.document.height,
+  vw = state.view.viewportWidth,
+  vh = state.view.viewportHeight,
+): number {
+  const pad = 44;
+  const sx = (vw - pad) / docWidth;
+  const sy = (vh - pad) / docHeight;
+  return Math.max(0.05, Math.min(sx, sy, 4));
+}
+
+export function getViewScale(): number {
+  return state.view.autoFit ? getFitScale() : state.view.zoom;
+}
+
+/**
+ * 新增头像时的初始摆放：
+ * 自动缩放并放置在当前工作区中心（而不是画布中心固定大小）。
+ */
+export function defaultLayerPlacement(): { x: number; y: number; size: number } {
+  const scale = getViewScale();
+  const vw = state.view.viewportWidth || 960;
+  const vh = state.view.viewportHeight || 620;
+
+  // 工作区可视区域换算到文档坐标系中的跨度
+  const visibleWidth = vw / scale;
+  const visibleHeight = vh / scale;
+
+  // 自动缩放：在当前视野中占约 35%（舒适可视比例），并通过 clampSize 限制在安全与文档合法范围内
+  const rawSize = Math.round(Math.min(visibleWidth, visibleHeight) * 0.35);
+  const size = clampSize(rawSize);
+
+  // 工作区中心换算到文档坐标系：
+  // 画布容器在工作区中 flex 居中，translate(view.x, view.y) 产生偏移
+  // 工作区中心对应文档坐标 (doc.width / 2 - view.x / scale, doc.height / 2 - view.y / scale)
+  const rawX = state.document.width / 2 - state.view.x / scale;
+  const rawY = state.document.height / 2 - state.view.y / scale;
+
+  // 保证图层即使在大幅平移时，也至少保留一部分在画布内可见
+  const clamped = clampLayerToDocument({ x: rawX, y: rawY, size }, state.document.width, state.document.height);
+
+  return {
+    x: Math.round(clamped.x),
+    y: Math.round(clamped.y),
+    size,
+  };
 }
 
 export function notify(tone: Notice['tone'], message: string): void {
@@ -307,7 +366,10 @@ export function notify(tone: Notice['tone'], message: string): void {
 }
 
 export function addLayer(skinId: string, overrides: Partial<AvatarLayer> = {}): AvatarLayer {
-  const size = overrides.size ?? defaultLayerSize();
+  const placement = defaultLayerPlacement();
+  const size = overrides.size ?? placement.size;
+  const x = overrides.x ?? placement.x;
+  const y = overrides.y ?? placement.y;
   const record = state.skins.find((s) => s.id === skinId);
   const isCustom = record?.meta.isCustomImage;
   const prefix = isCustom ? '图片' : '头像';
@@ -320,8 +382,8 @@ export function addLayer(skinId: string, overrides: Partial<AvatarLayer> = {}): 
     // 与两鬓盖成灰的（占成品 34% 面积），看着像坏图，但它就是官方原始数据，
     // 开着才是正版渲染结果；不想要的人在属性面板关掉即可。
     overlay: true,
-    x: state.document.width / 2,
-    y: state.document.height / 2,
+    x,
+    y,
     size,
     rotation: 0,
     opacity: 1,

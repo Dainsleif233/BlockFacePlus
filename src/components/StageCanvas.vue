@@ -37,6 +37,7 @@ import {
   scaleLayerBy,
   selectLayer,
   setMobilePanel,
+  setViewportSize,
   updateLayer,
 } from '../stores/editor';
 
@@ -44,9 +45,11 @@ import {
 const ROTATE_OFFSET = 41;
 /** 手柄命中半径（屏幕像素） */
 const HANDLE_HIT = 10;
-/** 手柄尺寸（屏幕像素），与 brand-spec 第 8 节一致 */
+/** 手柄尺寸（屏幕像素），与 brand-spec §5 一致 */
 const HANDLE_SIZE = 11;
 const KNOB_SIZE = 12;
+/** 头像在屏幕上的显示尺寸小于这个值，手柄就按比例微缩，免得四个角柄挤成一坨 */
+const MINI_LAYER_SIZE = 28;
 
 const INK = '#14110f';
 const PAPER = '#f2efe6';
@@ -158,6 +161,19 @@ function schedule(): void {
   });
 }
 
+let overlayFrame = 0;
+/**
+ * 只重画交互手柄：手柄活在视口屏幕坐标里，平移画布或改窗口大小时它必须跟着动，
+ * 而文档画布一个像素都不用重画 —— 平移不掉帧就靠这条线守住。
+ */
+function scheduleOverlay(): void {
+  if (overlayFrame) return;
+  overlayFrame = requestAnimationFrame(() => {
+    overlayFrame = 0;
+    renderOverlay();
+  });
+}
+
 function render(): void {
   renderDocument();
   renderOverlay();
@@ -222,22 +238,57 @@ function renderDocument(): void {
 function renderOverlay(): void {
   const canvas = overlayCanvas.value;
   if (!canvas) return;
-  const scale = previewScale.value;
-  const w = Math.max(1, Math.round(editor.document.width * scale));
-  const h = Math.max(1, Math.round(editor.document.height * scale));
-  if (canvas.width !== w) canvas.width = w;
-  if (canvas.height !== h) canvas.height = h;
+
+  const d = dpr();
+  const vw = wrapSize.value.w;
+  const vh = wrapSize.value.h;
+  const bw = Math.max(1, Math.round(vw * d));
+  const bh = Math.max(1, Math.round(vh * d));
+
+  // 物理分辨率紧贴工作区视口（与文档尺寸、缩放倍率都无关）：缩放和平移期间不重新分配显存
+  if (canvas.width !== bw) canvas.width = bw;
+  if (canvas.height !== bh) canvas.height = bh;
+
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.clearRect(0, 0, w, h);
-  ctx.scale(scale, scale);
+
+  // 手柄按 DPR 物理像素绘制，整数 DPR 下边缘不会糊成灰边
+  ctx.setTransform(d, 0, 0, d, 0, 0);
+  ctx.clearRect(0, 0, vw, vh);
 
   const layer = selected.value;
   if (!layer) return;
 
-  const px = 1 / viewScale.value; // 1 屏幕像素 = 多少文档单位
-  const corners = layerCorners(layer);
+  const scale = viewScale.value;
+  const artboardCenterX = vw / 2 + editor.view.x;
+  const artboardCenterY = vh / 2 + editor.view.y;
+  const docCenterX = editor.document.width / 2;
+  const docCenterY = editor.document.height / 2;
+
+  /** 文档逻辑坐标 → 工作区屏幕坐标（画板由 flex 居中，它的中心就是视口中心 + 平移量） */
+  const toScreen = (pt: { x: number; y: number }): { x: number; y: number } => ({
+    x: artboardCenterX + (pt.x - docCenterX) * scale,
+    y: artboardCenterY + (pt.y - docCenterY) * scale,
+  });
+
+  /** 方块手柄：底色 + 1px 墨线细边；hole > 0 时中心再嵌一个方孔（旋转旋钮的红石孔） */
+  const drawSquare = (centerX: number, centerY: number, size: number, fill: string, hole = 0): void => {
+    const x = Math.round(centerX - size / 2);
+    const y = Math.round(centerY - size / 2);
+    ctx.fillStyle = fill;
+    ctx.fillRect(x, y, size, size);
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = INK;
+    // 1px 墨线落在 +0.5 上才是一像素实线，否则会糊成两像素灰边
+    ctx.strokeRect(x + 0.5, y + 0.5, size - 1, size - 1);
+    if (hole > 0) {
+      const inset = Math.round((size - hole) / 2);
+      ctx.fillStyle = RED;
+      ctx.fillRect(x + inset, y + inset, hole, hole);
+    }
+  };
+
+  const corners = layerCorners(layer).map(toScreen);
 
   const tracePath = (): void => {
     ctx.beginPath();
@@ -246,58 +297,54 @@ function renderOverlay(): void {
     ctx.closePath();
   };
 
-  // 选中框：先铺一层 3px 纸色描边，再压 1px 墨线，等于 brand-spec 里的 outline-offset:1px
+  // 选中框：先铺一层 3px 纸色描边，再压 1px 墨线（brand-spec §5 的「选中外框」）
   tracePath();
   ctx.lineJoin = 'miter';
-  ctx.lineWidth = 3 * px;
+  ctx.lineWidth = 3;
   ctx.strokeStyle = PAPER;
   ctx.stroke();
-  ctx.lineWidth = 1 * px;
+  ctx.lineWidth = 1;
   ctx.strokeStyle = INK;
   ctx.stroke();
 
   // 编辑者（布局冻结）只画选中框：没有可交互的旋钮和缩放手柄，别误导用户去拖
   if (collabLocked.value) return;
 
-  const base = allHandlePositions(layer, 0);
-  const rotateHandle = allHandlePositions(layer, ROTATE_OFFSET * px).find((item) => item.name === 'rotate');
-  const nw = base.find((item) => item.name === 'nw');
-  const ne = base.find((item) => item.name === 'ne');
+  // 头像在屏幕上缩得很小时手柄按比例微缩，避免四个角柄互相覆盖遮挡
+  const mini = layer.size * scale < MINI_LAYER_SIZE;
+  const handleSize = mini ? Math.max(6, Math.round(layer.size * scale * 0.38)) : HANDLE_SIZE;
+  const knobSize = mini ? Math.max(7, Math.round(handleSize * (KNOB_SIZE / HANDLE_SIZE))) : KNOB_SIZE;
 
-  if (rotateHandle && nw && ne) {
-    const midX = (nw.point.x + ne.point.x) / 2;
-    const midY = (nw.point.y + ne.point.y) / 2;
+  // 一次算齐所有手柄（含旋转旋钮）：四角的位置与 rotateOffset 无关，找得到就够了
+  const handles = allHandlePositions(layer, ROTATE_OFFSET / scale);
+  const rotate = handles.find((item) => item.name === 'rotate');
+  const nw = handles.find((item) => item.name === 'nw');
+  const ne = handles.find((item) => item.name === 'ne');
+
+  if (rotate && nw && ne) {
+    const rot = toScreen(rotate.point);
+    const cornerA = toScreen(nw.point);
+    const cornerB = toScreen(ne.point);
+    const midX = (cornerA.x + cornerB.x) / 2;
+    const midY = (cornerA.y + cornerB.y) / 2;
+
     // 红色竖杆
     ctx.beginPath();
     ctx.moveTo(midX, midY);
-    ctx.lineTo(rotateHandle.point.x, rotateHandle.point.y);
-    ctx.lineWidth = 2 * px;
+    ctx.lineTo(rot.x, rot.y);
+    ctx.lineWidth = 2;
     ctx.strokeStyle = RED;
     ctx.stroke();
-    // 纸色方块旋钮，内含 3px 红石方孔
-    const knob = KNOB_SIZE * px;
-    const kx = rotateHandle.point.x - knob / 2;
-    const ky = rotateHandle.point.y - knob / 2;
-    ctx.fillStyle = PAPER;
-    ctx.fillRect(kx, ky, knob, knob);
-    ctx.lineWidth = 1 * px;
-    ctx.strokeStyle = INK;
-    ctx.strokeRect(kx + px / 2, ky + px / 2, knob - px, knob - px);
-    ctx.fillStyle = RED;
-    ctx.fillRect(kx + 3.5 * px, ky + 3.5 * px, 5 * px, 5 * px);
+
+    // 纸色方块旋钮，中心内嵌红石方孔
+    drawSquare(rot.x, rot.y, knobSize, PAPER, Math.max(3, Math.round(knobSize * 0.42)));
   }
 
   // 四角红色方块手柄
-  const size = HANDLE_SIZE * px;
-  for (const handle of base) {
+  for (const handle of handles) {
     if (handle.name === 'rotate') continue;
-    const x = handle.point.x - size / 2;
-    const y = handle.point.y - size / 2;
-    ctx.fillStyle = RED;
-    ctx.fillRect(x, y, size, size);
-    ctx.lineWidth = 1 * px;
-    ctx.strokeStyle = INK;
-    ctx.strokeRect(x + px / 2, y + px / 2, size - px, size - px);
+    const pt = toScreen(handle.point);
+    drawSquare(pt.x, pt.y, handleSize, RED);
   }
 }
 
@@ -458,7 +505,8 @@ function onPointerMove(event: PointerEvent): void {
     }
     editor.view.x = Math.round(active.viewX + (event.clientX - active.clientX));
     editor.view.y = Math.round(active.viewY + (event.clientY - active.clientY));
-    // 平移是纯 CSS transform，画布内容一个像素都不用重画
+    // 平移只动画板的 CSS transform，文档一个像素都不用重画；
+    // 手柄画在视口坐标系里，靠下面那条 watch(editor.view) 单独跟画
     return;
   }
 
@@ -674,10 +722,12 @@ onMounted(() => {
     resizeObserver = new ResizeObserver(() => {
       const rect = element.getBoundingClientRect();
       wrapSize.value = { w: rect.width, h: rect.height };
+      setViewportSize(rect.width, rect.height);
     });
     resizeObserver.observe(element);
     const rect = element.getBoundingClientRect();
     wrapSize.value = { w: rect.width, h: rect.height };
+    setViewportSize(rect.width, rect.height);
   }
   window.addEventListener('keydown', onKeyDown);
   schedule();
@@ -687,6 +737,7 @@ onBeforeUnmount(() => {
   resizeObserver?.disconnect();
   window.removeEventListener('keydown', onKeyDown);
   if (frame) cancelAnimationFrame(frame);
+  if (overlayFrame) cancelAnimationFrame(overlayFrame);
   if (zoomDebounceTimer) clearTimeout(zoomDebounceTimer);
   bgCacheCanvas = null;
   bgCacheKey = '';
@@ -705,6 +756,9 @@ watch(
   schedule,
   { deep: true },
 );
+
+// 视口平移量与工作区尺寸只影响手柄所在的屏幕坐标系：单独重画 overlay，文档画布不重画
+watch(() => [editor.view.x, editor.view.y, wrapSize.value.w, wrapSize.value.h], scheduleOverlay);
 
 defineExpose({ schedule });
 </script>
@@ -744,8 +798,9 @@ defineExpose({ schedule });
     >
       <div ref="stage" class="artboard" :style="stageStyle">
         <canvas ref="docCanvas" class="artboard__doc" role="img" aria-label="头像合成画布" />
-        <canvas ref="overlayCanvas" class="artboard__overlay" aria-hidden="true" />
       </div>
+
+      <canvas ref="overlayCanvas" class="stage__overlay" aria-hidden="true" />
 
       <span v-if="hover" class="stage__tip" :style="{ left: hover.x + 'px', top: hover.y + 'px' }">
         {{ hover.name }}
@@ -850,17 +905,23 @@ defineExpose({ schedule });
   will-change: transform;
 }
 
-.artboard__doc,
-.artboard__overlay {
+.artboard__doc {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
   display: block;
+  image-rendering: pixelated;
 }
 
-.artboard__doc { image-rendering: pixelated; }
-.artboard__overlay { pointer-events: none; }
+.stage__overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  pointer-events: none;
+}
 
 .stage__empty {
   position: absolute;

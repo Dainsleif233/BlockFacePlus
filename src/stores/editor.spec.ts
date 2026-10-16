@@ -82,3 +82,79 @@ describe('editor store - 素材管理与历史栈保护', () => {
     expect(getSkin(custom.id)).toBeNull();
   });
 });
+
+describe('editor store - 新增头像在工作区中心自动缩放摆放', () => {
+  beforeEach(() => {
+    editor.layers = [];
+    editor.selectedId = null;
+    editor.document = { width: 1280, height: 800 };
+    editor.view = { zoom: 1, autoFit: true, x: 0, y: 0, viewportWidth: 960, viewportHeight: 620 };
+  });
+
+  it('默认适应视图且未平移时，新头像放置在工作区中心（即画布正中），大小自适应工作区', () => {
+    const custom = registerSkin(createMockLoadedImage(), 'upload', '测试头像1', '上传', 'skin-place-1');
+    const layer = addLayer(custom.id);
+
+    expect(layer.x).toBe(640);
+    expect(layer.y).toBe(400);
+    // 960x620 视口，1280x800 画布，fitScale = (620-44)/800 = 0.72
+    // visibleHeight = 620 / 0.72 = 861.1, 861.1 * 0.35 ≈ 301
+    expect(layer.size).toBeGreaterThan(200);
+    expect(layer.size).toBeLessThan(400);
+  });
+
+  it('平移工作区后，新头像准确落在当前工作区中心所映射的文档位置', () => {
+    editor.view.autoFit = false;
+    editor.view.zoom = 1;
+    // 画布向左平移 200px、向上平移 100px，工作区中心看到的是画布更靠右下的区域
+    editor.view.x = -200;
+    editor.view.y = -100;
+
+    const custom = registerSkin(createMockLoadedImage(), 'upload', '测试头像2', '上传', 'skin-place-2');
+    const layer = addLayer(custom.id);
+
+    // docCenterX = 1280 / 2 - (-200) / 1 = 640 + 200 = 840
+    // docCenterY = 800 / 2 - (-100) / 1 = 400 + 100 = 500
+    expect(layer.x).toBe(840);
+    expect(layer.y).toBe(500);
+  });
+
+  it('放大工作区后，新头像自动缩放保持在当前视野内的合适比例（尺寸在文档坐标下缩小）', () => {
+    editor.view.autoFit = false;
+    editor.view.zoom = 2; // 放大 2 倍
+    editor.view.x = 0;
+    editor.view.y = 0;
+
+    const custom = registerSkin(createMockLoadedImage(), 'upload', '测试头像3', '上传', 'skin-place-3');
+    const layer = addLayer(custom.id);
+
+    // 视口尺寸 960x620，在 2 倍缩放下，可视范围为 480x310，310 * 0.35 ≈ 108
+    expect(layer.size).toBe(109);
+    expect(layer.x).toBe(640);
+    expect(layer.y).toBe(400);
+  });
+
+  it('工作区大幅平移离开画布时，图层位置受 clamp 限制，至少保留部分在画布内可见', () => {
+    editor.view.autoFit = false;
+    editor.view.zoom = 1;
+    editor.view.x = -9999;
+    editor.view.y = -9999;
+
+    const custom = registerSkin(createMockLoadedImage(), 'upload', '测试头像4', '上传', 'skin-place-4');
+    const layer = addLayer(custom.id);
+
+    expect(layer.x).toBeLessThan(1280 + layer.size);
+    expect(layer.y).toBeLessThan(800 + layer.size);
+    expect(layer.x).toBeGreaterThan(0);
+    expect(layer.y).toBeGreaterThan(0);
+  });
+
+  it('传入显式 overrides 时尊重原有显式尺寸与坐标', () => {
+    const custom = registerSkin(createMockLoadedImage(), 'upload', '测试头像5', '上传', 'skin-place-5');
+    const layer = addLayer(custom.id, { x: 123, y: 456, size: 78 });
+
+    expect(layer.x).toBe(123);
+    expect(layer.y).toBe(456);
+    expect(layer.size).toBe(78);
+  });
+});

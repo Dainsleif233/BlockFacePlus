@@ -59,18 +59,19 @@ Minecraft 皮肤采用标准化 UV 贴图排版：
 ## 3. 画布坐标系与视口变换
 
 ### 3.1 坐标分层
-BlockFace 采用双层画布设计：
-- **文档层 (Document Canvas)**：物理分辨率等于底图真实像素（无底图时为默认尺寸如 1280×800）。所有图层的 `x, y, size` 均基于文档坐标系。
-- **覆盖层 (Overlay Canvas)**：绘制选中外框、8个控制柄（缩放/边柄）与旋转旋钮。
+BlockFace 采用双层画布设计，两层刻意挂在**不同的坐标系与物理分辨率**上：
+- **文档层 (Document Canvas)**：所有图层的 `x, y, size` 均基于文档坐标系（默认文档 1280×800）。它挂在 `.artboard` 内部、随视图一起被 CSS transform 缩放；物理分辨率 = `clampRenderScale(文档尺寸 × 视图倍率 × DPR)`（单边上限 4096px、总像素上限 4096² ≈ 64MB 显存）。手势缩放期间由 CSS 变换即时跟手，停顿 150ms 稳定后再按新倍率重采样。
+- **覆盖层 (Overlay Canvas)**：挂在 `.stage__body` 上、**独立于画板**的视口层。物理分辨率恒等于「工作区视口 × DPR」，与文档尺寸和缩放倍率都无关，因此连续缩放/平移期间不会重新分配显存。绘制内容为选中外框、四角缩放手柄与顶部旋转旋钮，文档坐标先经「视口中心 + `view` 平移量」投影成屏幕坐标，再按像素取整绘制（1px 墨线走 +0.5 半像素对齐）。它的重绘由「`view` 平移量 / 工作区尺寸」单独驱动（`scheduleOverlay`），不牵动文档层重绘 —— 这是平移与缩放不掉帧的前提。
 
 ### 3.2 基于光标锚点的视口缩放算法
 为提供流畅的画布缩放体验，在视口中以光标为中心进行缩放时，必须同时补偿视口中心偏移量：
 ```ts
-// 视图缩放系数 k (nextZoom / currentZoom)
-// 补偿光标相对偏移与 Flex 居中布局带来的原点位移
-viewport.x = cursor.x - (cursor.x - viewport.x) * k + (document.width * (k - 1)) / 2;
-viewport.y = cursor.y - (cursor.y - viewport.y) * k + (document.height * (k - 1)) / 2;
+// 视图缩放系数 k = nextZoom / currentZoom
+// offset：光标相对画板左上角的屏幕偏移；size：画板当前在屏幕上的尺寸（document.width × viewScale）
+view.x = view.x + offset.x * (1 - k) + (size.width * (k - 1)) / 2;
+view.y = view.y + offset.y * (1 - k) + (size.height * (k - 1)) / 2;
 ```
+`offset × (1 - k)` 抵消画板左上角随缩放产生的漂移，`size × (k - 1) / 2` 补上「画板在容器里居中摆放、尺寸一变就挪半个尺寸差」的位移；漏掉后者内容会整体往一边溜。
 - 视口平移与缩放仅作用于渲染视口，**不计入**撤销/重做操作历史（Undo/Redo History）。
 - 图层的位置移动、尺寸缩放与旋转角度变更则作为文档操作进入历史记录栈。
 
