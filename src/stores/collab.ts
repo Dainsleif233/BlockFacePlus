@@ -10,7 +10,7 @@
  * 与 editor.ts 的耦合走钩子（setCollabHooks），避免模块循环依赖。
  */
 
-import { computed, reactive, ref } from 'vue';
+import { computed, reactive, shallowRef } from 'vue';
 import { CollabApiError, chunkUpdates, collabApi } from '../core/collab/api';
 import * as session from '../core/collab/session';
 import type { AvatarUpdate, RoomInfo, RoomRole } from '../core/collab/types';
@@ -51,17 +51,25 @@ const state = reactive<CollabState>({
   publishOpen: false,
 });
 
-/** 编辑者改过的头像 id（换肤即标记；提交成功后清空） */
-const dirtyIds = ref(new Set<string>());
-
-/** 载入时的基线：图层 id → 当时的 skinId；提交时对比找"改过内容"的头像 */
-const baselineSkin = new Map<string, string>();
+/**
+ * 载入时的基线：图层 id → 当时的 skinId；提交时对比找出"改过内容"的头像。
+ * shallowRef 只在整表替换时触发：不在这张表上原地 set，要改一律替换出新 Map。
+ */
+const baselineSkin = shallowRef(new Map<string, string>());
 /** 载入时每条头像的 updatedAt，提交时作为逐条冲突检查凭证 */
 const baselineStamp = new Map<string, number>();
 
 const locked = computed(() => state.mode === 'room' && state.role === 'editor');
 const isAdmin = computed(() => state.mode === 'room' && state.role === 'admin');
-const dirtyCount = computed(() => dirtyIds.value.size);
+/** 待提交数 = 当前 skinId 与基线不同的头像数：撤销回基线即时归零，不会残留过期徽章 */
+const dirtyCount = computed(() => {
+  let count = 0;
+  for (const layer of editor.layers) {
+    const baseline = baselineSkin.value.get(layer.id);
+    if (baseline !== undefined && baseline !== layer.skinId) count += 1;
+  }
+  return count;
+});
 
 const LAYOUT_LOCK_MESSAGE = '协同编辑下布局已锁定：位置与数量由发起者固定，只能换头像内容';
 
@@ -77,8 +85,8 @@ setCollabHooks({
     return false;
   },
   onSkinApplied(layerId: string): void {
-    if (!locked.value) return;
-    dirtyIds.value = new Set(dirtyIds.value).add(layerId);
+    // 待提交计数走实时差分（撤销回基线会自动归零），这里无需登记
+    void layerId;
   },
   isLayoutFrozen(): boolean {
     return locked.value;
@@ -90,12 +98,8 @@ setCollabHooks({
  * ------------------------------------------------------------------ */
 
 function captureBaseline(): void {
-  baselineSkin.clear();
+  baselineSkin.value = new Map(editor.layers.map((l) => [l.id, l.skinId]));
   baselineStamp.clear();
-  dirtyIds.value = new Set();
-  for (const layer of editor.layers) {
-    baselineSkin.set(layer.id, layer.skinId);
-  }
 }
 
 function currentPassword(): string {
@@ -212,16 +216,22 @@ export async function reloadRoom(): Promise<void> {
  * ------------------------------------------------------------------ */
 
 /** 把编辑者改过的头像编码成增量提交；编码失败返回错误文案 */
-function collectEditorUpdates(): { updates: AvatarUpdate[]; error: string | null } {
-  const changed = editor.layers.filter((l) => baselineSkin.get(l.id) !== undefined && baselineSkin.get(l.id) !== l.skinId);
-  if (changed.length === 0) return { updates: [], error: null };
+function collectEditorUpdates(): { updates: AvatarUpdate[]; skinIds: Map<string, string>; error: string | null } {
+  const changed = editor.layers.filter((l) => {
+    const baseline = baselineSkin.value.get(l.id);
+    return baseline !== undefined && baseline !== l.skinId;
+  });
+  if (changed.length === 0) return { updates: [], skinIds: new Map(), error: null };
   const updates: AvatarUpdate[] = [];
+  const skinIds = new Map<string, string>();
   for (const layer of changed) {
     const skin = encodeLayerSkin(layer.id);
-    if (!skin) return { updates: [], error: `「${layer.name}」的皮肤无法编码（可能是跨域来源），换一张再提交` };
+    if (!skin) return { updates: [], skinIds: new Map(), error: `「${layer.name}」的皮肤无法编码（可能是跨域来源），换一张再提交` };
     updates.push({ id: layer.id, skin, expectUpdatedAt: baselineStamp.get(layer.id) });
+    // 记下提交那一刻的 skinId：成功后基线拨到这个值，等待期间的新改动不会被旧基线吞掉
+    skinIds.set(layer.id, layer.skinId);
   }
-  return { updates, error: null };
+  return { updates, skinIds, error: null };
 }
 
 /** 编辑者/管理员点"完成"：角色不同走不同通道 */
@@ -234,7 +244,7 @@ export async function submitChanges(): Promise<void> {
   }
 
   if (state.role === 'editor') {
-    const { updates, error } = collectEditorUpdates();
+    const { updates, skinIds, error } = collectEditorUpdates();
     if (error) {
       notify('error', error);
       return;
@@ -254,12 +264,11 @@ export async function submitChanges(): Promise<void> {
         for (const item of result.results) {
           if (item.ok) {
             saved += 1;
-            const layer = editor.layers.find((l) => l.id === item.id);
-            if (layer) baselineSkin.set(item.id, layer.skinId);
+            const submitted = skinIds.get(item.id);
+            if (submitted !== undefined) {
+              baselineSkin.value = new Map(baselineSkin.value).set(item.id, submitted);
+            }
             if (item.updatedAt !== undefined) baselineStamp.set(item.id, item.updatedAt);
-            const next = new Set(dirtyIds.value);
-            next.delete(item.id);
-            dirtyIds.value = next;
           } else if (item.error === 'conflict') {
             conflicts.push(item.id);
           } else {
@@ -273,9 +282,7 @@ export async function submitChanges(): Promise<void> {
       if (failures.length > 0) parts.push(`${failures.length} 个头像提交失败`);
       const tone = conflicts.length === 0 && failures.length === 0 ? 'success' : 'warn';
       notify(tone, parts.join('；') || '提交完成');
-      if (conflicts.length > 0 || failures.length > 0) {
-        dirtyIds.value = new Set([...dirtyIds.value, ...conflicts, ...failures]);
-      }
+      // 冲突/失败的条目不用额外登记：基线没动，差分自然会继续把它们算作待提交
     } catch (error) {
       notify('error', error instanceof CollabApiError ? error.message : '提交失败，稍后再试');
     } finally {
