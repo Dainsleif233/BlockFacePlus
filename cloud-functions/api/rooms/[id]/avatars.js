@@ -13,6 +13,7 @@
 
 import {
   ApiError,
+  LAYER_ID_RE,
   MAX_PATCH_UPDATES,
   authenticate,
   avatarKey,
@@ -48,7 +49,9 @@ export async function onRequestPatch(context) {
     // 先整批读出旧记录，再整批校验，最后把通过的条目一次性写回
     const loaded = await Promise.all(
       body.updates.map(async (update) => {
-        if (!isRecord(update) || typeof update.id !== 'string' || update.id.length === 0 || update.id.length > 64) {
+        // id 直接参与拼存储键：放过 `../` 这类东西会让 store.get 抛异常（整个请求 500），
+        // 也会在 avatars/ 下造出子路径。这里用和落库同一套字符白名单卡死。
+        if (!isRecord(update) || typeof update.id !== 'string' || !LAYER_ID_RE.test(update.id)) {
           return { update, before: null, invalid: true };
         }
         const before = await store.get(avatarKey(roomId, update.id), { type: 'json' });

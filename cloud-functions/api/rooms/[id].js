@@ -18,6 +18,7 @@ import {
   errorResponse,
   getStoreStrong,
   jsonResponse,
+  metaKey,
   normalizeAvatarRecord,
   passwordOf,
   publicRoom,

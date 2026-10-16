@@ -26,7 +26,7 @@ export const MAX_PATCH_UPDATES = 64;
 /** 与前端 preset.ts 同一口径：白名单 data URI，防止 javascript: 之类的东西混进 <img src> */
 const SKIN_DATA_URL_RE = /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+\/=]*$/;
 const ROOM_ID_RE = /^[A-Za-z0-9_-]{6,64}$/;
-const LAYER_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+export const LAYER_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 /** 密码字符表：去掉 0/1/l/o 这类肉眼易混的字符，抄写不出错 */
 const PASSWORD_ALPHABET = '23456789abcdefghjkmnpqrstuvwxyz';
 const EXPIRY_DAYS = new Set([3, 7, 14]);
@@ -327,7 +327,11 @@ export function authenticate(meta, password, ip) {
 export function jsonResponse(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      // 别让浏览器把 JSON 当 HTML 猜：JSON 接口的类型嗅探是 XSS 的老入口
+      'X-Content-Type-Options': 'nosniff',
+    },
   });
 }
 
@@ -341,6 +345,11 @@ export function passwordOf(request) {
 }
 
 export async function readJsonBody(request, maxChars = 5 * 1024 * 1024) {
+  // 先看声明的字节数，别把超大 body 整个读进内存。
+  // UTF-8 下 1 个 UTF-16 单元最多编成 3 字节，所以字节数超过 maxChars * 3 的请求，
+  // 字符数必然超限 —— 提前拒掉，合法请求一个都不会被误伤。
+  const declared = Number(request.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > maxChars * 3) throw new ApiError(413, '请求体太大');
   const text = await request.text();
   if (text.length > maxChars) throw new ApiError(413, '请求体太大');
   try {

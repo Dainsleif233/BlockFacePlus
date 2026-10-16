@@ -16,6 +16,7 @@ import {
   authenticate,
   errorResponse,
   contentTypeForExt,
+  extForContentType,
   getStoreStrong,
   jsonResponse,
   passwordOf,
@@ -51,6 +52,8 @@ export async function onRequestGet(context) {
       status: 200,
       headers: {
         'Content-Type': meta.baseImage.type,
+        // 白名单之外不让浏览器猜类型：避免上传内容被当成可执行文档
+        'X-Content-Type-Options': 'nosniff',
         'Cache-Control': 'private, max-age=60',
         // 响应头不允许非 ASCII：文件名 percent-encoding，前端 decodeURIComponent 解回来
         'X-BF-Base-Name': encodeURIComponent(meta.baseImage.name || '底图'),
@@ -98,8 +101,14 @@ export async function onRequestPost(context) {
           : null;
       if (!key) throw new ApiError(400, '缺少待确认的底图');
 
-      const headers = (await store.getWithHeaders(key))?.headers ?? {};
+      // 只认真正躺在存储里的对象：拿不到头部就别把房间推进 ready，
+      // 否则会得到一间「发布成功、底图永远 404」的房间。
+      const head = await store.getWithHeaders(key).catch(() => null);
+      const headers = head?.headers ?? {};
       const length = Number(headers['content-length'] ?? headers['Content-Length'] ?? 0);
+      if (!head || !Number.isFinite(length) || length <= 0) {
+        throw new ApiError(409, '底图还没传上来，重新上传一次');
+      }
       if (length > MAX_BASE_IMAGE_BYTES) {
         await store.delete(key).catch(() => {});
         throw new ApiError(413, '底图超过 10MB 上限');
