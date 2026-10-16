@@ -210,7 +210,7 @@ async function copy(label: string, text: string): Promise<void> {
 
 .pub__copy {
   display: flex;
-  gap: 6px;
+  gap: 8px;
 }
 
 .pub__copy input {
