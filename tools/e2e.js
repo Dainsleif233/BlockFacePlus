@@ -348,15 +348,19 @@ try {
   }
 }
 
-// ============ 8b. 协同发布（页内 mock 后端） ============
-// 预设功能已由「共同编辑」取代：这一节验证发布链路 —— 创建房间（带完整布局），
-// 底图走预签名 URL 直传，回执确认后房间就绪。后端由 src/dev/collabMock.ts 模拟。
-const { installCollabMock } = await import('/src/dev/collabMock.ts');
+// ============ 8b. 协同发布（真实 FastAPI 后端） ============
+// 预设功能已由「共同编辑」取代：这一节验证发布链路 —— 建房（带完整布局）→ 上传底图 → 房间就绪。
+// 后端就是生产用的那个 FastAPI（Vite 把 /api 代理过去），没有页内 mock：
+// 「客户端发了什么」靠 fetch 录制器旁听，「服务端存成了什么」靠直接读房间快照。
+const e2e = await import('/tools/e2e-support.js');
+e2e.installFetchRecorder();
 const collabStore = await import('/src/stores/collab.ts');
 
 store.clearBaseImage();
 for (const item of [...editor.layers]) store.removeLayer(item.id);
 await sleep(300);
+
+e2e.resetApiCalls();
 
 // 没底图就点发布：应当被拦下并留在表单
 await collabStore.publishRoom(7);
@@ -395,20 +399,10 @@ await sleep(400);
 check('准备好一张底图加两个头像', editor.layers.length === 2, 'layers=' + editor.layers.length);
 
 
-// —— 发布执行（后端由页内 mock 模拟） ——
-const publishMock = installCollabMock({
-  roomId: 'e2eroom' + Math.random().toString(36).slice(2, 6),
-  editPassword: 'edit-e2e',
-  adminPassword: 'admin-e2e-12',
-  doc: { width: 320, height: 200 },
-  baseImage: { name: '我的底图.png', type: 'image/png', width: 320, height: 200 },
-  baseBlob: await new Promise((resolve) => baseCanvas.toBlob(resolve, 'image/png')),
-  // 发布自测从 draft 起步：走真实的"创建→直传→confirm(编辑密码)→ready"生命周期
-  startReady: false,
-});
-
+// —— 发布执行（真实后端：POST /api/rooms → POST /api/rooms/{id}/base） ——
+e2e.resetApiCalls();
 await collabStore.publishRoom(7);
-await sleep(1200);
+await sleep(2500);
 const published = collabStore.publishState.result;
 check('发布成功拿到房间号与两个密码',
   !!published && /^[A-Za-z0-9_-]{6,64}$/.test(published.roomId) && !!published.editPassword && !!published.adminPassword,
@@ -419,35 +413,69 @@ check('过期时间落在 7 天附近',
 check('分享链接带上了房间号',
   !!published && collabStore.publishState.result.shareUrl.indexOf('room=' + published.roomId) >= 0,
   published ? collabStore.publishState.result.shareUrl : '没有结果');
+check('发布流程走到 done（底图已上传、房间已就绪）',
+  collabStore.publishState.step === 'done',
+  collabStore.publishState.step + ' / ' + collabStore.publishState.error);
 
-const createCall = publishMock.calls.find((c) => c.method === 'POST' && c.path === '/api/rooms');
+const createCall = e2e.apiCalls({ method: 'POST', path: '/api/rooms' })[0];
 check('创建请求带了完整布局快照',
-  !!createCall && createCall.body.layers.length === 2 && !!createCall.body.layers[0].skin.dataUrl,
-  createCall ? ('layers=' + createCall.body.layers.length) : '没有创建请求');
+  !!createCall && !!createCall.body && Array.isArray(createCall.body.layers)
+    && createCall.body.layers.length === 2 && !!createCall.body.layers[0].skin.dataUrl,
+  createCall && createCall.body ? ('layers=' + createCall.body.layers.length) : '没有创建请求');
 check('创建请求的层不带版本戳（服务端职责）',
-  !!createCall && !('skinUpdatedAt' in createCall.body.layers[0]) && !('layoutUpdatedAt' in createCall.body.layers[0]),
-  createCall ? Object.keys(createCall.body.layers[0]).join(',') : '');
+  !!createCall && !!createCall.body && Array.isArray(createCall.body.layers)
+    && !('skinUpdatedAt' in createCall.body.layers[0]) && !('layoutUpdatedAt' in createCall.body.layers[0]),
+  createCall && createCall.body ? Object.keys(createCall.body.layers[0]).join(',') : '');
 check('创建请求不再带冗余的画布尺寸（底图尺寸就是画布尺寸）',
-  !!createCall && !('doc' in createCall.body),
-  createCall ? Object.keys(createCall.body).join(',') : '');
+  !!createCall && !!createCall.body && !('doc' in createCall.body),
+  createCall && createCall.body ? Object.keys(createCall.body).join(',') : '');
 check('过期天数随发布请求走（发了 7 天）',
-  !!createCall && createCall.body.expiresDays === 7,
-  createCall ? String(createCall.body.expiresDays) : '');
-const uploadCall = publishMock.calls.find((c) => c.method === 'PUT' && c.path === '/mock-upload');
-check('底图字节走预签名直传（绕过函数）',
-  !!uploadCall && uploadCall.bytes > 1000,
-  uploadCall ? uploadCall.bytes + ' bytes' : '没有直传');
-const confirmCall = published && publishMock.calls.find((c) => c.path === '/api/rooms/' + published.roomId + '/base');
-check('回执确认用编辑密码并切到 ready',
-  !!confirmCall && confirmCall.password === 'edit-e2e' && confirmCall.body.intent === 'confirm' && publishMock.state.status === 'ready',
-  confirmCall ? ('pwd=' + confirmCall.password + ' / status=' + publishMock.state.status) : '没有确认请求');
-check('发布链路无协议违规',
-  publishMock.violations.length === 0,
-  publishMock.violations.join('；'));
+  !!createCall && !!createCall.body && createCall.body.expiresDays === 7,
+  createCall && createCall.body ? String(createCall.body.expiresDays) : '');
 
-// 把凭据递给运行器，驱动后两个阶段（编辑者 / 管理员）
+const uploadCall = e2e.apiCalls({ method: 'POST', pathEndsWith: '/base' })[0];
+check('底图走 multipart 直传自己的后端（不再有预签名直传）',
+  !!uploadCall && !!uploadCall.fields
+    && String(uploadCall.fields.file).indexOf('<file:') === 0
+    && uploadCall.fields.width === '320' && uploadCall.fields.height === '200'
+    && String(uploadCall.fields.name).indexOf('我的底图') >= 0
+    && uploadCall.bytes > 1000,
+  uploadCall
+    ? (JSON.stringify(uploadCall.fields) + ' / ' + uploadCall.bytes + ' bytes')
+    : '没有上传请求');
+check('multipart 的类型头交给浏览器带 boundary（客户端不手写 Content-Type）',
+  !!uploadCall && uploadCall.contentType === '',
+  uploadCall ? ('Content-Type=' + JSON.stringify(uploadCall.contentType)) : '没有上传请求');
+check('上传底图带的是编辑密码（这时房主还没进房）',
+  !!uploadCall && !!published && uploadCall.password === published.editPassword,
+  uploadCall ? ('pwd=' + (uploadCall.password ? '<' + uploadCall.password.length + ' 位>' : '无')) : '没有上传请求');
+check('预签名直传那条老路一次都没被调用',
+  e2e.apiCalls({ method: 'PUT' }).length === 0,
+  'PUT 次数=' + e2e.apiCalls({ method: 'PUT' }).length);
+
+const snapshot = published ? await e2e.apiGetRoom(published.roomId, published.adminPassword) : null;
+check('服务端房间已 ready',
+  !!snapshot && snapshot.status === 200 && !!snapshot.data && snapshot.data.room.status === 'ready',
+  snapshot ? ('HTTP ' + snapshot.status + ' / ' + (snapshot.data && snapshot.data.room ? snapshot.data.room.status : '?')) : '没有快照');
+check('服务端头像数与画布尺寸都对得上',
+  !!snapshot && snapshot.status === 200 && Array.isArray(snapshot.data.avatars)
+    && snapshot.data.avatars.length === 2
+    && snapshot.data.room.doc.width === 320 && snapshot.data.room.doc.height === 200,
+  snapshot && snapshot.data && snapshot.data.room
+    ? (snapshot.data.avatars.length + ' 个头像 / ' + snapshot.data.room.doc.width + '×' + snapshot.data.room.doc.height)
+    : '没有快照');
+check('服务端底图信息与上传的一致',
+  !!snapshot && snapshot.status === 200 && !!snapshot.data.room.baseImage
+    && snapshot.data.room.baseImage.type === 'image/png'
+    && snapshot.data.room.baseImage.name.indexOf('我的底图') >= 0,
+  snapshot && snapshot.data.room.baseImage ? JSON.stringify(snapshot.data.room.baseImage) : '没有底图');
+check('管理员密码换到的是管理员角色',
+  !!snapshot && snapshot.status === 200 && snapshot.data.role === 'admin',
+  snapshot ? String(snapshot.data && snapshot.data.role) : '');
+
+// 把真实凭据递给运行器，驱动后两个阶段（编辑者 / 管理员）
 window.__BFPLUS_PUBLISH__ = published
-  ? { roomId: published.roomId, editPassword: 'edit-e2e', adminPassword: 'admin-e2e-12' }
+  ? { roomId: published.roomId, editPassword: published.editPassword, adminPassword: published.adminPassword }
   : null;
 
 
