@@ -11,6 +11,8 @@ node_modules
 dist
 dist-ssr
 *.local
+.edgeone/
+.env
 
 # 设计初稿与验证截图：属于本地过程产物，不随源码入库
 design-demos/
