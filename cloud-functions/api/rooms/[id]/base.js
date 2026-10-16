@@ -15,7 +15,7 @@ import {
   MAX_DOC_SIZE,
   authenticate,
   errorResponse,
-  extForContentType,
+  contentTypeForExt,
   getStoreStrong,
   jsonResponse,
   passwordOf,
@@ -35,7 +35,7 @@ function sanitizeName(raw) {
     .slice(0, 80);
 }
 
-function baseKeyOf(meta, ext) {
+export async function baseKeyOf(meta, ext) {
   return `rooms/${meta.roomId}/images/base.${ext}`;
 }
 
@@ -107,7 +107,8 @@ export async function onRequestPost(context) {
       }
 
       const ext = key.slice(key.lastIndexOf('.') + 1);
-      const type = isDraft ? pending?.type : extForContentType(ext) ? `image/${ext === 'jpg' ? 'jpeg' : ext}` : null;
+      // 房间就绪后的换底图：手里只有 key 的后缀，用反查表还原 MIME（extForContentType 的方向是反的）
+      const type = isDraft ? pending?.type : contentTypeForExt(ext);
       if (!type) throw new ApiError(400, '底图类型不合法');
 
       const width = Math.round(Number(body.width));

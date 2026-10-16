@@ -85,6 +85,19 @@ export function extForContentType(contentType) {
   return CONTENT_EXT[String(contentType || '').toLowerCase()] ?? null;
 }
 
+/** 反查：底图确认时只拿得到文件后缀，需要还原 MIME 类型 */
+const EXT_CONTENT_TYPE = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  webp: 'image/webp',
+  gif: 'image/gif',
+};
+
+export function contentTypeForExt(ext) {
+  return EXT_CONTENT_TYPE[String(ext || '').toLowerCase()] ?? null;
+}
+
 /* ------------------------------------------------------------------ *
  * 密码：生成 / 哈希 / 校验
  *
