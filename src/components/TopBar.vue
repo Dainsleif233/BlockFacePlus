@@ -98,7 +98,7 @@ function onDelete(): void {
           :disabled="collab.submitting"
           @click="onDelete"
         >
-          <i class="bf-ic bf-ic--del" aria-hidden="true" />
+          <i class="bf-ic bf-ic--del" aria-hidden="true"><b /><b /></i>
         </button>
       </template>
 
@@ -156,9 +156,9 @@ function onDelete(): void {
 
 .role-badge {
   font: 600 var(--bf-font-size-ui)/1 var(--bf-mono);
-  padding: 5px 9px;
+  padding: 4px 8px;
   border-radius: var(--bf-radius);
-  border: 1.5px solid var(--bf-ink);
+  border: 1px solid var(--bf-ink);
 }
 
 .role-badge--editor {
@@ -168,7 +168,7 @@ function onDelete(): void {
 
 .role-badge--admin {
   background: var(--bf-red);
-  color: var(--bf-ink);
+  color: var(--bf-white); /* 红底墨字只有 3.8:1，白字 5:1 过 WCAG AA */
 }
 
 .dirty {
