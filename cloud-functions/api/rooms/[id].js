@@ -66,8 +66,10 @@ export async function onRequestPut(context) {
     const body = await readJsonBody(context.request);
     if (!isRecord(body)) throw new ApiError(400, '请求体格式不对');
 
+    // 并发凭证必填：没有它，一个读旧状态的客户端就能绕过乐观锁直接盖掉别人的改动
     const ifRevision = body.ifRevision;
-    if (typeof ifRevision === 'number' && ifRevision !== (meta.revision ?? 0)) {
+    if (!Number.isFinite(ifRevision)) throw new ApiError(400, '缺少 ifRevision 并发凭证');
+    if (ifRevision !== (meta.revision ?? 0)) {
       throw new ApiError(409, '房间刚被别人改过，请刷新后再提交', { revision: meta.revision ?? 0 });
     }
 

@@ -265,12 +265,22 @@ export async function deleteRoom(roomId) {
 /** 顺带清理：把索引里已过期的房间连锅端掉（惰性过期 + 创建时摊销清扫） */
 export async function sweepExpiredRooms(now = Date.now()) {
   const s = await store();
-  const { blobs } = await s.list({ prefix: 'index/' });
-  const expired = [];
-  for (const b of blobs) {
-    const entry = await s.get(b.key, { type: 'json' });
-    if (entry && typeof entry.roomId === 'string' && isExpired(entry, now)) expired.push(entry.roomId);
-  }
+  // 清扫是建房时捎带的摊销任务：单页 + 截断，一次最多看 24 个索引，
+  // 历史房间再多也不会把创建接口拖进超时（下一批留给下一次创建）。
+  const { blobs } = await s.list({ prefix: 'index/', paginate: false });
+  const batch = blobs.slice(0, 24);
+  const entries = await Promise.all(
+    batch.map(async (b) => {
+      try {
+        return await s.get(b.key, { type: 'json' });
+      } catch {
+        return null;
+      }
+    }),
+  );
+  const expired = entries
+    .filter((entry) => entry && typeof entry.roomId === 'string' && isExpired(entry, now))
+    .map((entry) => entry.roomId);
   await Promise.all(expired.map((roomId) => deleteRoom(roomId).catch(() => {})));
   return expired.length;
 }
