@@ -20,6 +20,7 @@ import {
   jsonResponse,
   passwordOf,
   readJsonBody,
+  metaKey,
   requireRoom,
   roomPrefix,
 } from '../../lib.js';
@@ -33,10 +34,6 @@ function sanitizeName(raw) {
     .replace(/[\u0000-\u001f]/g, '')
     .trim()
     .slice(0, 80);
-}
-
-export async function baseKeyOf(meta, ext) {
-  return `rooms/${meta.roomId}/images/base.${ext}`;
 }
 
 export async function onRequestGet(context) {
@@ -128,7 +125,7 @@ export async function onRequestPost(context) {
         pendingBase: null,
         revision: (meta.revision ?? 0) + 1,
       };
-      await store.setJSON(`rooms/${meta.roomId}/meta.json`, nextMeta);
+      await store.setJSON(metaKey(meta.roomId), nextMeta);
 
       // 换底图成功后清掉旧文件，别让 1GB 额度被旧图吃掉
       if (!isDraft && meta.baseImage && meta.baseImage.key !== key) {

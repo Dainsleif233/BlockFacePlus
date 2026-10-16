@@ -26,7 +26,6 @@ import {
   requireRoom,
 } from '../../lib.js';
 
-const STORE_NAME = 'blockface-plus';
 
 function isRecord(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
