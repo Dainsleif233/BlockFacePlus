@@ -80,7 +80,6 @@ async function submit(): Promise<void> {
   justify-content: center;
   padding: 24px;
   background: color-mix(in srgb, var(--bf-stage) 78%, transparent);
-  backdrop-filter: blur(4px);
 }
 
 .gate__card {
@@ -89,10 +88,10 @@ async function submit(): Promise<void> {
   border: 2px solid var(--bf-ink);
   border-radius: var(--bf-radius);
   box-shadow: 6px 6px 0 rgba(0, 0, 0, 0.14);
-  padding: 22px 24px 24px;
+  padding: 24px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   text-align: center;
   align-items: center;
 }

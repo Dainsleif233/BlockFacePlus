@@ -130,7 +130,6 @@ async function copy(label: string, text: string): Promise<void> {
   justify-content: center;
   padding: 24px;
   background: color-mix(in srgb, var(--bf-stage) 78%, transparent);
-  backdrop-filter: blur(4px);
 }
 
 .pub__card {
@@ -141,7 +140,7 @@ async function copy(label: string, text: string): Promise<void> {
   border: 2px solid var(--bf-ink);
   border-radius: var(--bf-radius);
   box-shadow: 6px 6px 0 rgba(0, 0, 0, 0.14);
-  padding: 22px 24px 24px;
+  padding: 24px;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -204,7 +203,7 @@ async function copy(label: string, text: string): Promise<void> {
 .pub__field {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   font-size: var(--bf-font-size-sm);
   color: var(--bf-ink);
 }
