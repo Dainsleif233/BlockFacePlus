@@ -11,10 +11,13 @@
  */
 
 import {
+  ADMIN_PASSWORD_LENGTH,
   ApiError,
+  EDIT_PASSWORD_LENGTH,
   MAX_DOC_SIZE,
   MAX_LAYERS,
   avatarKey,
+  baseImageKey,
   errorResponse,
   extForContentType,
   generateAdminPassword,
@@ -70,10 +73,11 @@ export async function onRequestPost(context) {
     const roomId = generateRoomId();
     const now = Date.now();
     const expiresAt = now + ttlMs;
-    const baseKey = `rooms/${roomId}/images/base.${ext}`;
+    const baseKey = baseImageKey(roomId, ext);
 
     const editPassword = generateEditPassword();
     const adminPassword = generateAdminPassword();
+    const [editPasswordHash, adminPasswordHash] = await Promise.all([hashPassword(editPassword), hashPassword(adminPassword)]);
 
     const meta = {
       roomId,
@@ -83,8 +87,11 @@ export async function onRequestPost(context) {
       status: 'draft',
       baseImage: null,
       pendingBase: { key: baseKey, type: String(baseImage.type).toLowerCase(), bytes: 0 },
-      editPasswordHash: hashPassword(editPassword),
-      adminPasswordHash: hashPassword(adminPassword),
+      editPasswordHash,
+      adminPasswordHash,
+      // 记下密码长度：校验时长度对不上的一把不用去算 scrypt（见 lib.js checkPassword）
+      editPasswordLength: EDIT_PASSWORD_LENGTH,
+      adminPasswordLength: ADMIN_PASSWORD_LENGTH,
       revision: 0,
     };
 

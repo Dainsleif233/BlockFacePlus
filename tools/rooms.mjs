@@ -154,6 +154,7 @@ function fmtBytes(n) {
 const metaKey = (id) => `rooms/${id}/meta.json`;
 const indexKey = (id) => `index/${id}.json`;
 const roomPrefix = (id) => `rooms/${id}/`;
+const throttleKey = (id) => `throttle/${id}.json`;
 
 async function listAll(prefix) {
   const { blobs } = await store.list({ prefix, paginate: true });
@@ -257,26 +258,30 @@ async function scanOrphans(withSize) {
     const stats = await roomStats(id, withSize);
     rows.push({ roomId: id, avatars: stats.avatars, images: stats.images, objects: stats.objects, bytes: withSize ? fmtBytes(stats.bytes) : '-' });
   }
-  return { rows, orphanIndex };
+  // 限流状态是我方新增的键位：房间没了它就成了没人认领的垃圾，一并算孤儿
+  const throttleIds = (await listAll('throttle/')).map((k) => k.replace(/^throttle\//, '').replace(/\.json$/, ''));
+  const orphanThrottle = throttleIds.filter((id) => !indexIds.has(id)).map((id) => ({ roomId: id, key: throttleKey(id) }));
+  return { rows, orphanIndex, orphanThrottle };
 }
 
 async function cmdOrphans() {
   const withSize = want('size');
-  const { rows, orphanIndex } = await scanOrphans(withSize);
-  if (want('json')) { console.log(JSON.stringify({ orphanDirs: rows, orphanIndex }, null, 2)); return; }
+  const { rows, orphanIndex, orphanThrottle } = await scanOrphans(withSize);
+  if (want('json')) { console.log(JSON.stringify({ orphanDirs: rows, orphanIndex, orphanThrottle }, null, 2)); return; }
   if (rows.length === 0) console.log('没有孤儿对象。');
   else {
     table(['房间号', '头像', '底图', ...(withSize ? ['占用'] : []), '对象'], rows.map((r) => [r.roomId, r.avatars, r.images, ...(withSize ? [r.bytes] : []), r.objects]));
     console.log(`\n共 ${rows.length} 个「对象在、索引没了」的孤儿房间，用 rm-orphans 清掉。`);
   }
   if (orphanIndex.length > 0) console.log(`另有 ${orphanIndex.length} 条「索引在、对象没了」的残留索引：${orphanIndex.map((e) => e.roomId).join(', ')}`);
+  if (orphanThrottle.length > 0) console.log(`另有 ${orphanThrottle.length} 个房间已不在、限流状态还在的残留键：${orphanThrottle.map((e) => e.roomId).join(', ')}`);
 }
 
 async function cmdRm() {
   if (positional.length === 0) { console.error('用法：node tools/rooms.mjs rm <roomId...> [--yes]'); process.exit(2); }
   const dryRun = !want('yes');
   for (const roomId of positional) {
-    const keys = [...(await listAll(roomPrefix(roomId))), indexKey(roomId)];
+    const keys = [...(await listAll(roomPrefix(roomId))), indexKey(roomId), throttleKey(roomId)];
     console.log(`${dryRun ? '[预演] ' : ''}房间 ${roomId}：${keys.length} 个对象`);
     const done = await deleteKeys(keys, dryRun);
     if (!dryRun) console.log(`  完成，删除 ${done}/${keys.length}`);
@@ -293,7 +298,7 @@ async function cmdGc() {
   let planned = 0;
   let deleted = 0;
   for (const e of expired) {
-    const keys = [...(await listAll(roomPrefix(e.roomId))), indexKey(e.roomId)];
+    const keys = [...(await listAll(roomPrefix(e.roomId))), indexKey(e.roomId), throttleKey(e.roomId)];
     console.log(`${dryRun ? '[预演] ' : ''}${e.roomId}（${fmtLeft(e.expiresAt, now)}）：${keys.length} 个对象`);
     planned += keys.length;
     deleted += await deleteKeys(keys, dryRun, false);
@@ -302,8 +307,8 @@ async function cmdGc() {
 }
 
 async function cmdRmOrphans() {
-  const { rows, orphanIndex } = await scanOrphans(false);
-  if (rows.length === 0 && orphanIndex.length === 0) { console.log('没有孤儿数据。'); return; }
+  const { rows, orphanIndex, orphanThrottle } = await scanOrphans(false);
+  if (rows.length === 0 && orphanIndex.length === 0 && orphanThrottle.length === 0) { console.log('没有孤儿数据。'); return; }
   const dryRun = !want('yes');
   let planned = 0;
   let deleted = 0;
@@ -317,6 +322,11 @@ async function cmdRmOrphans() {
     console.log(`${dryRun ? '[预演] ' : ''}残留索引 ${e.indexKey}`);
     planned += 1;
     deleted += await deleteKeys([e.indexKey], dryRun, false);
+  }
+  for (const e of orphanThrottle) {
+    console.log(`${dryRun ? '[预演] ' : ''}残留限流键 ${e.key}`);
+    planned += 1;
+    deleted += await deleteKeys([e.key], dryRun, false);
   }
   console.log(`\n${dryRun ? `预计删除 ${planned} 个孤儿对象（加 --yes 执行）` : `已删除 ${deleted}/${planned} 个孤儿对象`}。`);
 }

@@ -36,7 +36,7 @@ export async function onRequestPatch(context) {
   try {
     const roomId = context.params.id;
     const meta = await requireRoom(roomId);
-    const role = authenticate(meta, passwordOf(context.request), context.clientIp);
+    const role = await authenticate(meta, passwordOf(context.request));
     if (role !== 'editor' && role !== 'admin') throw new ApiError(403, '没有权限');
 
     const body = await readJsonBody(context.request);

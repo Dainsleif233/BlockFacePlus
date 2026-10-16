@@ -14,12 +14,14 @@ import {
   MAX_BASE_IMAGE_BYTES,
   MAX_DOC_SIZE,
   authenticate,
+  baseImageKey,
   errorResponse,
   contentTypeForExt,
   extForContentType,
   getStoreStrong,
   jsonResponse,
   passwordOf,
+  pruneBaseImages,
   readJsonBody,
   metaKey,
   requireRoom,
@@ -28,6 +30,14 @@ import {
 
 function isRecord(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** 换底图的键只可能是 sign 发出去的那种固定键（rooms/<id>/images/base.<后缀>），别的一律不认 */
+function swapKeyOf(roomId, raw) {
+  if (typeof raw !== 'string') return null;
+  const prefix = `${roomPrefix(roomId)}images/base.`;
+  if (!raw.startsWith(prefix)) return null;
+  return contentTypeForExt(raw.slice(prefix.length)) ? raw : null;
 }
 
 function sanitizeName(raw) {
@@ -40,7 +50,7 @@ function sanitizeName(raw) {
 export async function onRequestGet(context) {
   try {
     const meta = await requireRoom(context.params.id);
-    const role = authenticate(meta, passwordOf(context.request), context.clientIp);
+    const role = await authenticate(meta, passwordOf(context.request));
     if (!role) throw new ApiError(401, '密码不对');
 
     if (!meta.baseImage) throw new ApiError(409, '底图尚未上传完成');
@@ -69,7 +79,7 @@ export async function onRequestGet(context) {
 export async function onRequestPost(context) {
   try {
     const meta = await requireRoom(context.params.id);
-    const role = authenticate(meta, passwordOf(context.request), context.clientIp);
+    const role = await authenticate(meta, passwordOf(context.request));
     const body = await readJsonBody(context.request);
     if (!isRecord(body)) throw new ApiError(400, '请求体格式不对');
 
@@ -78,13 +88,15 @@ export async function onRequestPost(context) {
     if (body.intent === 'sign') {
       // 换底图：只有管理员；预签名 URL 十分钟内有效，够前端直传
       if (role !== 'admin') throw new ApiError(403, '只有管理员能更换底图');
-      const ext = extForContentType(body.type);
+      const type = String(body.type ?? '').toLowerCase();
+      const ext = extForContentType(type);
       if (!ext) throw new ApiError(400, '底图只支持 PNG / JPG / WebP / GIF');
-      const key = `rooms/${meta.roomId}/images/base-${Date.now()}.${ext}`;
-      const { url, expiresAt } = await store.createUploadUrl(key, {
-        expireSeconds: 600,
-        contentType: String(body.type).toLowerCase(),
-      });
+      // 同一间房、同一个后缀只对应一个键：重新上传就是覆盖，
+      // 不会因为「签了名传了不确认」在库里堆出一串没人引用的死文件
+      const key = baseImageKey(meta.roomId, ext);
+      const { url, expiresAt } = await store.createUploadUrl(key, { expireSeconds: 600, contentType: type });
+      // 顺手把上一次没确认的残渣收掉（这次要传的、以及当前正在用的底图除外）
+      await pruneBaseImages(meta.roomId, [key, meta.baseImage?.key]).catch(() => {});
       return jsonResponse({ upload: { url, key, expiresAt } });
     }
 
@@ -93,12 +105,9 @@ export async function onRequestPost(context) {
       // 草稿期是"创建者正在发布"的窗口，编辑者密码可确认；就绪之后换底图仅管理员
       if (!isDraft && role !== 'admin') throw new ApiError(403, '只有管理员能更换底图');
 
+      // 草稿期的键是创建时发的那个；房间就绪后只认 sign 发出去的那种固定键
       const pending = isDraft ? meta.pendingBase : null;
-      const key = isDraft
-        ? pending?.key
-        : typeof body.key === 'string' && body.key.startsWith(roomPrefix(meta.roomId) + 'images/base-')
-          ? body.key
-          : null;
+      const key = isDraft ? pending?.key : swapKeyOf(meta.roomId, body.key);
       if (!key) throw new ApiError(400, '缺少待确认的底图');
 
       // 只认真正躺在存储里的对象：拿不到头部就别把房间推进 ready，
@@ -136,10 +145,9 @@ export async function onRequestPost(context) {
       };
       await store.setJSON(metaKey(meta.roomId), nextMeta);
 
-      // 换底图成功后清掉旧文件，别让 1GB 额度被旧图吃掉
-      if (!isDraft && meta.baseImage && meta.baseImage.key !== key) {
-        await store.delete(meta.baseImage.key).catch(() => {});
-      }
+      // 确认之后清掉同前缀的其它底图：旧后缀的、上传中断的、历史遗留的 base-<时间戳>。
+      // 它们都没有 meta 引用，不收就一直占着 1GB 的额度。
+      await pruneBaseImages(meta.roomId, key).catch(() => {});
       return jsonResponse({ ok: true, doc: { width, height }, revision: nextMeta.revision });
     }
 

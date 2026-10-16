@@ -41,7 +41,7 @@ export async function onRequestGet(context) {
   try {
     const roomId = context.params.id;
     const meta = await requireRoom(roomId);
-    const role = authenticate(meta, passwordOf(context.request), context.clientIp);
+    const role = await authenticate(meta, passwordOf(context.request));
 
     const { store, keys } = await listAvatarKeys(roomId);
     const records = await Promise.all(keys.map((key) => store.get(key, { type: 'json' })));
@@ -61,7 +61,7 @@ export async function onRequestPut(context) {
   try {
     const roomId = context.params.id;
     const meta = await requireRoom(roomId);
-    const role = authenticate(meta, passwordOf(context.request), context.clientIp);
+    const role = await authenticate(meta, passwordOf(context.request));
     if (role !== 'admin') throw new ApiError(403, '只有管理员能改布局');
 
     const body = await readJsonBody(context.request);
@@ -123,7 +123,7 @@ export async function onRequestDelete(context) {
   try {
     const roomId = context.params.id;
     const meta = await requireRoom(roomId);
-    const role = authenticate(meta, passwordOf(context.request), context.clientIp);
+    const role = await authenticate(meta, passwordOf(context.request));
     if (role !== 'admin') throw new ApiError(403, '只有管理员能删除房间');
 
     await deleteRoom(roomId);
