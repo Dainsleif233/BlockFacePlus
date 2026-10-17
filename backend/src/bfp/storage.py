@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from .config import Settings
 
@@ -29,8 +30,10 @@ __all__ = [
     "find_base_image",
     "orphan_base_files",
     "preview_dir",
+    "preview_file",
     "preview_files",
     "preview_image_path",
+    "preview_meta",
     "rollback_base_files",
 ]
 
@@ -69,6 +72,47 @@ def preview_files(settings: Settings, room_id: str) -> list[Path]:
     if not directory.is_dir():
         return []
     return [path for path in directory.glob(f"{room_id}.*") if path.is_file()]
+
+
+def preview_meta(base_row: Any) -> dict[str, Any] | None:
+    """这间房在**元数据上**声明的预览；没有声明就是 None。
+
+    base_row 是 room_base 的一行（aiosqlite.Row 或 dict），None = 这间房还没有底图记录。
+
+    只认 preview_ext —— 它非空就代表"有一份预览被写进了库"。这里**不碰磁盘**：
+    public_room 每次进房都会被调用，为它 stat 一次没必要；纯函数也更好测。
+    但"库里有声明"不等于"盘上真的有文件"（可能被删、被断电截断、还没生成完），
+    所以下载路径用的是 preview_file()，它在这一层之上再加"文件确实在"。
+
+    四列本该全有或全无，可那是约定不是约束（schema 里没有 CHECK，写入点还不止一处）。
+    脏了也照实回报，不在这里自己编一个尺寸出来 —— 唯一要做的是别再解释一遍那四列。
+    """
+    if base_row is None or not base_row["preview_ext"]:
+        return None
+    return {
+        "ext": base_row["preview_ext"],
+        "type": base_row["preview_type"],
+        "width": base_row["preview_width"],
+        "height": base_row["preview_height"],
+    }
+
+
+def preview_file(settings: Settings, room_id: str, base_row: Any) -> tuple[Path, str | None, str] | None:
+    """这间房此刻真正可用的预览：(路径, MIME, 后缀)；没有就 None。
+
+    唯一的判定点 —— 快照、下载、运维 inspect 必须都调它，否则会出现
+    "前端说有预览、实际拿到原图"这种自相矛盾。
+
+    判据刻意与一直生效的那个一致：**元数据声明了预览（preview_ext 非空）且文件确实在盘上**。
+    不再额外要求 preview_width —— 多一个条件就多一条分叉的路。
+    """
+    meta = preview_meta(base_row)
+    if meta is None:
+        return None
+    path = preview_image_path(settings, room_id, meta["ext"])
+    if not path.is_file():
+        return None
+    return path, meta["type"], meta["ext"]
 
 
 def find_base_image(settings: Settings, room_id: str) -> Path | None:

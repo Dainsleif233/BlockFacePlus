@@ -51,8 +51,8 @@ from .storage import (
     base_image_path,
     cleanup_base_backups,
     orphan_base_files,
+    preview_file,
     preview_files,
-    preview_image_path,
     rollback_base_files,
 )
 
@@ -190,11 +190,11 @@ async def get_base(request: Request, room_id: str) -> FileResponse:
     # 而管理员要负责换底图与导出，必须拿到原始像素。
     # 预览缺失（老房间没回填 / 生成失败 / 动图）时退回原图 —— 正确性优先于省流量。
     if role != "admin" and settings.base_preview_max_edge > 0:
-        preview_ext = base_row["preview_ext"]
-        if preview_ext:
-            preview_path = preview_image_path(settings, meta["room_id"], preview_ext)
-            if preview_path.is_file():
-                return _serve_base(request, preview_path, base_row["preview_type"], base_row["name"], "preview")
+        # 唯一判定在 storage.preview_file()：快照（public_room）与这里必须说同一件事
+        available = preview_file(settings, meta["room_id"], base_row)
+        if available is not None:
+            preview_path, preview_type, _ext = available
+            return _serve_base(request, preview_path, preview_type, base_row["name"], "preview")
 
     path = base_image_path(settings, meta["room_id"], base_row["ext"])
     if not path.is_file():

@@ -10,7 +10,13 @@
 - 前端：纯静态 SPA，部署在边缘 Pages；通过构建期变量 `VITE_API_BASE_URL` 指向 VPS 后端。
 - 鉴权：密码走自定义请求头 `X-BF-Room-Pwd`，**绝不进 URL / query / 日志**。
 - 跨域：后端按 `BF_CORS_ORIGINS` 配置 CORS，允许方法 `GET/POST/PATCH/DELETE/OPTIONS`，
-  允许头 `X-BF-Room-Pwd, Content-Type`，暴露头 `X-BF-Base-Name, X-BF-Base-Variant`。
+  允许头 `X-BF-Room-Pwd, Content-Type, If-None-Match`，
+  暴露头 `X-BF-Base-Name, X-BF-Base-Variant, ETag`。
+  **后两个不是可选的礼貌配置**：底图的 `ETag` / 条件请求（§2.6）依赖它们，而浏览器对跨域
+  请求头是逐字比对的 —— 少 `If-None-Match` 预检当场 400；少 `ETag` 则前端读到的
+  `etag` 是 `undefined`（跨域响应里没 expose 的头对 JS 一律不可见），字节一条也缓存不进去。
+  同源部署（本地 Vite 代理、§5.4）根本不发预检，所以这两条只在「前端在 Pages、后端在 VPS」
+  这种跨域形态下才会现形 —— 本地全绿不代表线上能用。
 - 错误响应统一为 `{"error": "<中文人话>"}`，HTTP 状态码语义：
   `400` 入参不合法（含超过一间房的行数上限）/ `401` 密码不对 / `403` 角色不够 /
   `404` 房间不存在 / `409` 状态未就绪 / `410` 房间已过期 / `413` 体积超限 /

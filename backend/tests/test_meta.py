@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 
 from bfp import __main__ as entry
-from conftest import pwd
+from conftest import png_bytes, pwd
 
 DEFAULT_CONFIG = {
     "version": "0.2.0",
@@ -114,6 +114,67 @@ async def test_cors_preflight_allows_password_header_and_exposes_base_name(harne
     actual = await harness.client.get("/api/health", headers={"Origin": "https://pages.example.com"})
     assert actual.headers["access-control-allow-origin"] == "*"
     assert "x-bf-base-name" in actual.headers["access-control-expose-headers"].lower()
+
+
+async def test_cors_lets_the_conditional_base_request_work_across_origins(open_harness, tmp_path):
+    """跨域下「304 + 客户端按 ETag 缓存」这两条路能不能成立，全看这两个头。
+
+    回归用例，一测盯一个洞：
+    1. `If-None-Match` 不在 allow_headers 里 → Starlette 对请求头是逐字比对的，
+       预检当场 400（不是把请求放给应用），浏览器连 GET 都不会发出去；
+    2. `ETag` 不在 expose_headers 里 → 请求过了也白搭：跨域响应里没 expose 的头对 JS
+       一律不可见，前端读到的 etag 就是 undefined，baseCache.ts 里
+       `if (!entry.etag) return false` 会把每一条缓存判成不可用，字节一条都写不进 IndexedDB。
+
+    为什么这么久没被发现：本地是**同源**（Vite 代理）部署，同源不发预检、也没有响应头可见性
+    限制 —— 这个洞只在生产那种「前端在 Pages、后端在 VPS」的跨域形态下才现形。
+    """
+    async with open_harness(tmp_path, BF_BASE_PREVIEW_MAX_EDGE="256") as harness:
+        room_id, edit, admin = await harness.create_ok()
+        uploaded = await harness.upload(room_id, admin, content=png_bytes(64, 64), width=64, height=64)
+        assert uploaded.status_code == 200, uploaded.text
+        origin = {"Origin": "https://pages.example.com"}
+
+        # 1) 浏览器带着 If-None-Match 回来问之前，先发的就是这一条预检
+        preflight = await harness.client.options(
+            f"/api/rooms/{room_id}/base",
+            headers={
+                **origin,
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "if-none-match, x-bf-room-pwd",
+            },
+        )
+        assert preflight.status_code in (200, 204), preflight.text
+        assert preflight.headers["access-control-allow-origin"] == "*"
+        allowed = {
+            name.strip().lower()
+            for name in preflight.headers["access-control-allow-headers"].split(",")
+        }
+        assert "if-none-match" in allowed
+        # 密码头与它是同一条预检里的两个请求头：加了新的不能把旧的顶掉
+        assert "x-bf-room-pwd" in allowed
+
+        # 2) 真响应上 ETag 必须对 JS 可见（expose-headers 按规范只作用于真实响应，预检不带）
+        first = await harness.client.get(f"/api/rooms/{room_id}/base", headers={**pwd(edit), **origin})
+        assert first.status_code == 200
+        etag = first.headers["etag"]
+        assert etag and etag.startswith('"')
+        exposed = {
+            name.strip().lower()
+            for name in first.headers["access-control-expose-headers"].split(",")
+        }
+        assert "etag" in exposed
+        assert "x-bf-base-variant" in exposed
+
+        # 3) 两道门都通了缓存才真的省字节：带着拿到的 ETag 回来应当拿到 304，
+        #    这也是前两次提交想要的效果 —— 这里从浏览器视角把它整个走一遍
+        revalidated = await harness.client.get(
+            f"/api/rooms/{room_id}/base",
+            headers={**pwd(edit), **origin, "If-None-Match": etag},
+        )
+        assert revalidated.status_code == 304
+        assert revalidated.content == b""
+        assert revalidated.headers["etag"] == etag
 
 
 async def test_config_accepts_narrowed_origin_whitelist(open_harness, tmp_path):

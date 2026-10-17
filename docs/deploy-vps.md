@@ -284,6 +284,21 @@ curl -si -X OPTIONS https://api.example.com/api/rooms \
 `x-bf-room-pwd` 和 `content-type`。缺哪个就回去查 `BF_CORS_ORIGINS`（来源必须**逐字符**相等：
 多一个结尾斜杠、写成 http、带了路径，都会被判定为不允许）。
 
+再单独验一次**条件请求**那条预检。底图下载靠 `ETag` 省流量（第二次进房只回 304），
+而浏览器带 `If-None-Match` 之前必须先过预检 —— 这个头不在白名单里时预检直接 400，
+表现为「底图迟迟出不来、控制台一条 Disallowed CORS headers」，很容易被误判成后端挂了：
+
+```bash
+curl -si -X OPTIONS https://api.example.com/api/rooms/abc123/base \
+  -H 'Origin: https://你的-pages-域名' \
+  -H 'Access-Control-Request-Method: GET' \
+  -H 'Access-Control-Request-Headers: if-none-match,x-bf-room-pwd' | head -20
+```
+
+要看到 `200`（或 `204`）且 `access-control-allow-headers` 含 `if-none-match`。
+再打一次真实 GET（随便一个能过鉴权的房间）确认响应头里有 `access-control-expose-headers: ... ETag`
+—— 少了它前端仍能拿到图，但永远缓存不上，每次进房都整张重下。
+
 ### 5.4 替代方案：同源部署（一个域名既发前端又反代 /api）
 
 跨域是要付代价的：多一次 preflight、CSP 要多放行一个来源、密码头要跨域。

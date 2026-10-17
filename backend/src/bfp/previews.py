@@ -89,6 +89,18 @@ def _save(image: Image.Image, path: Path) -> tuple[str, str]:
     raise RuntimeError("预览图编码失败，尝试过：" + "/".join(errors))
 
 
+def _fsync(path: Path) -> None:
+    """把已经编码好的预览刷到盘上，再交给 os.replace。
+
+    预览是可重建的，所以这里的 fsync 不比底图（storage.py 的 StagedBaseImage）更要紧；
+    但**状态一致性是一样的**：不刷就换名的话，断电后盘上可能是个 0 字节/半截文件，
+    而库里 preview_ext 已经有值 —— base.py 会认为预览可用，浏览器却解不出图。
+    直接拿 rb+ 打开目标文件：fd 由 os.open 拿到的只读句柄在 Windows 上 fsync 会 EBADF。
+    """
+    with open(path, "rb+") as handle:
+        os.fsync(handle.fileno())
+
+
 def render_preview(source: Path, settings: Settings, room_id: str) -> PreviewResult | None:
     """从原图生成预览并落到 base/preview/{roomId}.{ext}；无法生成时返回 None。
 
@@ -125,6 +137,8 @@ def render_preview(source: Path, settings: Settings, room_id: str) -> PreviewRes
 
         ext, mime = _save(prepared, temp_path)
         final = directory / f"{room_id}.{ext}"
+        # 临时文件 → fsync → os.replace，与底图写入同一条规矩（见 storage.py 开头的两条不变量）
+        _fsync(temp_path)
         os.replace(temp_path, final)
         # 换格式（webp ↔ jpg）时把旧的清掉，一间房只留一个预览文件
         for stale in preview_files(settings, room_id):

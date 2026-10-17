@@ -34,9 +34,16 @@ log = logging.getLogger("bfp")
 
 # 允许的跨域方法：本应用只有这五种，多一种都是白送的面
 CORS_METHODS = ["GET", "POST", "PATCH", "DELETE", "OPTIONS"]
-CORS_HEADERS = ["X-BF-Room-Pwd", "Content-Type"]
+# If-None-Match 必须显式放行，不是可选的礼貌配置：生产是跨域部署（前端在 EdgeOne Pages、
+# 后端在 VPS），它不在 CORS 安全列表里，浏览器就得先发一次预检；中间件逐字比对
+# allow_headers，缺这一项预检当场 400 "Disallowed CORS headers"，条件请求这条链路整条死掉。
+# 同源部署根本不发预检，所以单测与本地联调都照不出这个洞 —— 它就是这么活下来的。
+CORS_HEADERS = ["X-BF-Room-Pwd", "Content-Type", "If-None-Match"]
 # X-BF-Base-Variant 告诉前端这一份是原图还是预览（坐标空间不依赖它，只用于提示文案）
-CORS_EXPOSE_HEADERS = ["X-BF-Base-Name", "X-BF-Base-Variant"]
+# ETag 同理：按 Fetch 规范，跨域响应里没有 expose 的头对 JS 一律不可见，
+# 前端读到的 etag 就是 undefined，baseCache.ts 里 `if (!entry.etag) return false`
+# 会把每一条缓存判成不可用 —— 字节一条都写不进 IndexedDB，下次进房照样整张重下。
+CORS_EXPOSE_HEADERS = ["X-BF-Base-Name", "X-BF-Base-Variant", "ETag"]
 
 # 非业务错误（路由不存在、方法不对…）也要维持契约第 1 节的错误形状。
 # 不注册处理器的话它们会走 FastAPI 的默认响应 {"detail": "Not Found"}，

@@ -26,7 +26,7 @@ from .config import DEFAULT_VERSION, Settings
 from .db import Database
 from .previews import render_preview
 from .security import now_ms
-from .storage import base_image_path
+from .storage import base_image_path, preview_file, preview_meta
 from .sweep import SweepResult, delete_room, sweep_once, sweep_preview
 
 __all__ = ["main"]
@@ -138,6 +138,16 @@ async def _cmd_inspect(db: Database, settings: Settings, args: argparse.Namespac
     file_path = (
         base_image_path(settings, room_id, base_row["ext"]) if base_row is not None else settings.base_dir / room_id
     )
+    # 预览同样走 storage 里那个唯一判定：运维看到的"有预览"必须就是下载真的会发的那一份，
+    # 不然排查"前端说有预览、实际拿到原图"时会被第二套口径带偏。
+    preview = preview_meta(base_row)
+    if preview is not None:
+        available = preview_file(settings, room_id, base_row)
+        preview = {
+            **preview,
+            "path": str(available[0]) if available is not None else None,
+            "exists": available is not None,
+        }
     payload = {
         "roomId": room_id,
         "found": True,
@@ -157,17 +167,9 @@ async def _cmd_inspect(db: Database, settings: Settings, args: argparse.Namespac
                 "path": str(file_path),
                 "exists": file_path.is_file(),
                 "bytes": file_path.stat().st_size if file_path.is_file() else 0,
-                # 预览是给非管理员的：这里一并回出来，方便判断"老房间要不要跑 previews"
-                "preview": (
-                    {
-                        "ext": base_row["preview_ext"],
-                        "type": base_row["preview_type"],
-                        "width": base_row["preview_width"],
-                        "height": base_row["preview_height"],
-                    }
-                    if base_row["preview_ext"]
-                    else None
-                ),
+                # 预览是给非管理员的：这里一并回出来，方便判断"老房间要不要跑 previews"。
+                # exists=false 就是"库里有声明、盘上没文件"那类脏状态，非管理员此刻拿的是原图。
+                "preview": preview,
             }
             if base_row is not None
             else None
@@ -208,6 +210,8 @@ async def _cmd_inspect(db: Database, settings: Settings, args: argparse.Namespac
         preview_info = base_info["preview"]
         if preview_info is None:
             print("  预览       无（非管理员也拿原图）")
+        elif not preview_info["exists"]:
+            print(f"  预览       库里声明了 {preview_info['ext']}，但文件不在盘上（非管理员此刻拿原图）")
         else:
             print(f"  预览       {preview_info['width']}x{preview_info['height']} [{preview_info['type']}]")
     throttle_info = payload["throttle"]
@@ -251,7 +255,7 @@ async def _cmd_previews(db: Database, settings: Settings, args: argparse.Namespa
         return 0
 
     rows = await db.fetchall(
-        "SELECT room_id, ext, preview_ext FROM room_base WHERE status = 'ready' ORDER BY room_id"
+        "SELECT room_id, ext, preview_ext, updated_at FROM room_base WHERE status = 'ready' ORDER BY room_id"
     )
     pending = [row for row in rows if args.force or not row["preview_ext"]]
     if args.dry_run:
@@ -276,11 +280,20 @@ async def _cmd_previews(db: Database, settings: Settings, args: argparse.Namespa
             skipped += 1
             continue
         async with db.transaction() as conn:
-            await conn.execute(
+            # updated_at 做守卫：生成预览要解一张几十 MiB 的图，这期间管理员可能已经换了底图。
+            # 不加守卫就会把旧图的预览尺寸写到新图那一行上（base.py 写预览元数据时同样带这个守卫）。
+            cursor = await conn.execute(
                 "UPDATE room_base SET preview_ext = ?, preview_type = ?, preview_width = ?, "
-                "preview_height = ? WHERE room_id = ?",
-                (result.ext, result.mime, result.width, result.height, room_id),
+                "preview_height = ? WHERE room_id = ? AND updated_at = ?",
+                (result.ext, result.mime, result.width, result.height, room_id, row["updated_at"]),
             )
+            swapped = cursor.rowcount == 0
+        if swapped:
+            # 影响行数为 0 = 期间有人换了底图（或房间没了）：这一份预览不属于当前底图，跳过。
+            # 文件本身留在盘上是无害的 —— 它会被下一轮 previews / 下一次上传覆盖掉。
+            skipped += 1
+            print(f"  {room_id}：生成期间底图已被更换，跳过", file=sys.stderr)
+            continue
         done += 1
         print(f"  {room_id}：{result.width}x{result.height} {result.ext}")
 

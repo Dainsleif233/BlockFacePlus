@@ -51,6 +51,7 @@ from .security import (
     hash_password,
     now_ms,
 )
+from .storage import preview_meta
 from .sweep import delete_room
 
 __all__ = [
@@ -106,6 +107,17 @@ async def require_room(request: Request, room_id: str) -> tuple[aiosqlite.Row, a
     return meta, base
 
 
+def _preview_size(meta: dict[str, Any] | None) -> dict[str, Any] | None:
+    """库里的预览声明 → 快照里的 preview 字段（形状保持不变：只有 width/height）
+
+    width/height 脏成 NULL 时照实回 NULL，不在这一层修正：
+    判断"有没有预览"的口径只有一个，把脏数据就地补全就是又造了第二套解释。
+    """
+    if meta is None:
+        return None
+    return {"width": meta["width"], "height": meta["height"]}
+
+
 def public_room(meta: aiosqlite.Row, base: aiosqlite.Row | None) -> dict[str, Any]:
     """房间对外的样子：身份来自 rooms，画布尺寸与底图来自 room_base。
 
@@ -126,12 +138,10 @@ def public_room(meta: aiosqlite.Row, base: aiosqlite.Row | None) -> dict[str, An
                 # 预览图只是按同一比例缩小的像素源，绝不参与坐标换算。
                 "width": base["width"],
                 "height": base["height"],
-                # 有没有预览、预览多大（NULL = 没有，非管理员也只能拿原图）
-                "preview": (
-                    {"width": base["preview_width"], "height": base["preview_height"]}
-                    if base["preview_ext"] and base["preview_width"]
-                    else None
-                ),
+                # 有没有预览、预览多大（NULL = 没有，非管理员也只能拿原图）。
+                # 判据来自 storage.preview_meta()，与下载那条路的 preview_file() 同一个出发点；
+                # 区别只在后者还会 stat 一次盘 —— 进房没必要为一张可重生成的图做 IO。
+                "preview": _preview_size(preview_meta(base)),
             }
             if ready
             else None

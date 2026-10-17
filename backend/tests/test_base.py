@@ -475,6 +475,46 @@ async def test_room_without_preview_falls_back_to_the_full_image(open_harness, t
         assert downloaded.content == content
 
 
+async def test_snapshot_and_download_agree_when_preview_row_is_dirty(open_harness, tmp_path):
+    """四列"全有或全无"是约定不是约束：脏数据下快照与下载必须说同一件事
+
+    旧实现有三套判据：base.py 看 preview_ext + 文件在不在，public_room 还多要一个
+    preview_width，ops.inspect 只看 preview_ext。构造一行"preview_ext/preview_type 有值、
+    preview_width/preview_height 为 NULL"（直接 UPDATE 数据库，模拟旧写入点留下的脏状态）
+    就能让快照说"没有预览"、下载却发预览。
+    现在两条路都从 storage 的同一个判定出发，这里断言的正是"它们不会再分叉"。
+    """
+    async with open_harness(tmp_path, BF_BASE_PREVIEW_MAX_EDGE="128") as harness:
+        room_id, edit, admin = await harness.create_ok()
+        uploaded = await harness.upload(room_id, admin, content=png_bytes(512, 512), width=512, height=512)
+        assert uploaded.status_code == 200, uploaded.text
+        assert (harness.data_dir / "base" / "preview" / f"{room_id}.webp").is_file()
+
+        # 只抹掉尺寸两列：preview_ext / preview_type 与盘上的文件都还在
+        async with harness.db.transaction() as conn:
+            await conn.execute(
+                "UPDATE room_base SET preview_width = NULL, preview_height = NULL WHERE room_id = ?",
+                (room_id,),
+            )
+
+        room = (await harness.client.get(f"/api/rooms/{room_id}", headers=pwd(edit))).json()["room"]
+        downloaded = await harness.client.get(f"/api/rooms/{room_id}/base", headers=pwd(edit))
+        assert downloaded.status_code == 200
+        assert downloaded.headers["x-bf-base-variant"] == "preview"
+        # 这句就是验收点：快照说有预览 ⇔ 实际下载真的发预览
+        assert room["baseImage"]["preview"] is not None
+
+        # 反过来也一样：文件不在了，两边都必须说"没有预览"，下载退回原图
+        (harness.data_dir / "base" / "preview" / f"{room_id}.webp").unlink()
+        room_after = (await harness.client.get(f"/api/rooms/{room_id}", headers=pwd(edit))).json()["room"]
+        download_after = await harness.client.get(f"/api/rooms/{room_id}/base", headers=pwd(edit))
+        assert download_after.headers["x-bf-base-variant"] == "full"
+        assert download_after.content == png_bytes(512, 512)
+        # 元数据还声明着预览（public_room 不做 IO），但"文件可用"这一层已经不再声称有 ——
+        # 这正是两层职责分明的样子：声明归 preview_meta，可用归 preview_file。
+        assert room_after["baseImage"]["preview"] == {"width": None, "height": None}
+
+
 async def test_replacing_the_base_rebuilds_the_preview(open_harness, tmp_path):
     async with open_harness(tmp_path, BF_BASE_PREVIEW_MAX_EDGE="128") as harness:
         room_id, edit, admin = await harness.create_ok()
