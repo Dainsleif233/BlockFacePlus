@@ -308,3 +308,50 @@ async def test_adds_are_normalized_like_create(harness):
     assert clamped["size"] == 16_384  # 夹到上限（= 画布边长上限，图层不可能比画布还大）
     assert clamped["x"] == 100_000
     assert clamped["y"] == -100_000
+
+
+async def test_adds_are_capped_by_the_room_total_not_by_the_request(open_harness, tmp_path):
+    """行数上限是「一间房」的：每次只加一条也要把房间累计起来算
+
+    只按单次请求判等于没有上限 —— 分几次 adds 就能把房间堆过 512 行，
+    而 GET 是一次性全量返回的，房间越界之后每次进房都要把整间房读进内存。
+    """
+    async with open_harness(tmp_path, BF_MAX_LAYERS="3") as harness:
+        room_id, _edit, admin = await harness.create_ok(layers=[draft("l1"), draft("l2")])
+
+        # 一次只加一条，条数远没到 3，但房间累计已经到 3 行
+        third = await patch(harness, room_id, admin, {"adds": [draft("l3")]})
+        assert third.status_code == 200, third.text
+        assert third.json()["results"][0]["ok"] is True
+
+        fourth = await patch(harness, room_id, admin, {"adds": [draft("l4")]})
+        assert fourth.status_code == 400
+        assert fourth.json()["error"] == "这间房已经有 3 个头像，再加 1 个会超过一间房的上限（3）：先删几个再试"
+
+        # 整批回滚：同一批里的 updates 也没落库
+        mixed = await patch(
+            harness,
+            room_id,
+            admin,
+            {"updates": [{"id": "l1", "layout": {"x": 42}}], "adds": [draft("l5")]},
+        )
+        assert mixed.status_code == 400
+        avatar = next(a for a in (await snapshot(harness, room_id, admin))["avatars"] if a["id"] == "l1")
+        assert avatar["x"] != 42
+
+        # 满了以后「同一批里删一行 + 加一行」必须放行：这一批的删除腾出了位置
+        swap = await patch(harness, room_id, admin, {"deletes": ["l2"], "adds": [draft("l6")]})
+        assert swap.status_code == 200, swap.text
+        ids = [a["id"] for a in (await snapshot(harness, room_id, admin))["avatars"]]
+        assert sorted(ids) == ["l1", "l3", "l6"]
+
+        # 但删一个不存在的 id 不能白占位：服务端对不存在的行返回成功是幂等，不是允许超上限
+        cheat = await patch(harness, room_id, admin, {"deletes": ["no-such-row"], "adds": [draft("l7")]})
+        assert cheat.status_code == 400
+        assert len((await snapshot(harness, room_id, admin))["avatars"]) == 3
+
+        # 删掉一行之后单独再加也照样能过：上限算的是当下行数，不是历史累计
+        assert (await patch(harness, room_id, admin, {"deletes": ["l3"]})).status_code == 200
+        again = await patch(harness, room_id, admin, {"adds": [draft("l8")]})
+        assert again.status_code == 200, again.text
+        assert len((await snapshot(harness, room_id, admin))["avatars"]) == 3

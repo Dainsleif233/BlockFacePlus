@@ -116,6 +116,25 @@ async def _fetch_avatar(conn: aiosqlite.Connection, room_id: str, layer_id: str)
         await cursor.close()
 
 
+async def _count_avatars(
+    conn: aiosqlite.Connection,
+    room_id: str,
+    only_ids: Sequence[str] | None = None,
+) -> int:
+    """数一数这间房有几行；给了 only_ids 就只数这些 id 里真实存在的"""
+    sql = "SELECT COUNT(*) AS n FROM avatars WHERE room_id = ?"
+    params: list[Any] = [room_id]
+    if only_ids:
+        sql += " AND id IN (" + ", ".join("?" * len(only_ids)) + ")"
+        params.extend(only_ids)
+    cursor = await conn.execute(sql, params)
+    try:
+        row = await cursor.fetchone()
+    finally:
+        await cursor.close()
+    return int(row["n"]) if row is not None else 0
+
+
 @router.patch("/{room_id}/avatars")
 async def patch_avatars(request: Request, room_id: str) -> JSONResponse:
     settings = get_settings(request)
@@ -151,6 +170,22 @@ async def patch_avatars(request: Request, room_id: str) -> JSONResponse:
     results: list[dict[str, Any]] = []
 
     async with db.transaction() as conn:
+        # 行数上限是「一间房」的，不是「一次请求」的。只按单次请求判等于没有上限：
+        # 分四十次 adds 就能把一间房堆到 512 行以上，而 GET /api/rooms/{id} 是一次性
+        # 全量返回的 —— 房间越界之后，任何一次进房都要把整间房读进内存。
+        # 判在事务里：两个并发的 adds 不会各自读到同一个旧行数，然后都判定「还没满」。
+        if adds:
+            total = await _count_avatars(conn, meta["room_id"])
+            # 同一批里的 deletes 会腾出位置，只数真实存在的那些删：否则「删一个不存在的 id + 加一个」
+            # 就能一直绕开上限（服务端对不存在的行也返回成功，那是幂等，不是允许白占位）。
+            freed = await _count_avatars(conn, meta["room_id"], deletes) if deletes else 0
+            if total - freed + len(adds) > settings.max_layers:
+                raise ApiError(
+                    400,
+                    f"这间房已经有 {total} 个头像，再加 {len(adds)} 个会超过一间房的上限"
+                    f"（{settings.max_layers}）：先删几个再试",
+                )
+
         # ---- 改：只读请求里提到的那些行，不扫全房 ----
         for update in updates:
             layer_id = _js_id(update.get("id"))
