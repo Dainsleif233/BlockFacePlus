@@ -35,7 +35,8 @@ log = logging.getLogger("bfp")
 # 允许的跨域方法：本应用只有这五种，多一种都是白送的面
 CORS_METHODS = ["GET", "POST", "PATCH", "DELETE", "OPTIONS"]
 CORS_HEADERS = ["X-BF-Room-Pwd", "Content-Type"]
-CORS_EXPOSE_HEADERS = ["X-BF-Base-Name"]
+# X-BF-Base-Variant 告诉前端这一份是原图还是预览（坐标空间不依赖它，只用于提示文案）
+CORS_EXPOSE_HEADERS = ["X-BF-Base-Name", "X-BF-Base-Variant"]
 
 # 非业务错误（路由不存在、方法不对…）也要维持契约第 1 节的错误形状。
 # 不注册处理器的话它们会走 FastAPI 的默认响应 {"detail": "Not Found"}，

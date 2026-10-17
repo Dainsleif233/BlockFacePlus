@@ -10,7 +10,7 @@
 - 前端：纯静态 SPA，部署在边缘 Pages；通过构建期变量 `VITE_API_BASE_URL` 指向 VPS 后端。
 - 鉴权：密码走自定义请求头 `X-BF-Room-Pwd`，**绝不进 URL / query / 日志**。
 - 跨域：后端按 `BF_CORS_ORIGINS` 配置 CORS，允许方法 `GET/POST/PATCH/DELETE/OPTIONS`，
-  允许头 `X-BF-Room-Pwd, Content-Type`，暴露头 `X-BF-Base-Name`。
+  允许头 `X-BF-Room-Pwd, Content-Type`，暴露头 `X-BF-Base-Name, X-BF-Base-Variant`。
 - 错误响应统一为 `{"error": "<中文人话>"}`，HTTP 状态码语义：
   `400` 入参不合法（含超过一间房的行数上限）/ `401` 密码不对 / `403` 角色不够 /
   `404` 房间不存在 / `409` 状态未就绪 / `410` 房间已过期 / `413` 体积超限 /
@@ -59,7 +59,8 @@
   "room": {
     "roomId": "...",
     "doc": { "width": 1920, "height": 1080 },
-    "baseImage": { "name": "底图.png", "type": "image/png", "width": 1920, "height": 1080 },
+    "baseImage": { "name": "底图.png", "type": "image/png", "width": 1920, "height": 1080,
+                   "preview": { "width": 2048, "height": 1152 } },
     "createdAt": 1760000000000,
     "expiresAt": 1760604800000,
     "status": "ready"
@@ -120,21 +121,46 @@
 
 ```jsonc
 { "ok": true, "doc": { "width": 1920, "height": 1080 },
-  "baseImage": { "name": "底图.png", "type": "image/png", "width": 1920, "height": 1080 } }
+  "baseImage": { "name": "底图.png", "type": "image/png", "width": 1920, "height": 1080,
+                 "preview": { "width": 2048, "height": 1152 } } }
 ```
 
 同一个房间、同一个后缀只对应一个存储文件；换底图是**覆盖 + 清理其它后缀**，不留孤儿文件。
 
+上传成功后服务端会顺手生成一份预览图（长边 `BF_BASE_PREVIEW_MAX_EDGE`），
+响应里的 `preview` 就是它的尺寸。预览生成失败**不会**让这次上传失败：
+此时 `preview` 为 `null`，所有人退回拿原图。换底图会立刻作废旧预览，
+旧图绝不会被当成新图的预览发出去。
+
 ### 2.6 `GET /api/rooms/{roomId}/base` — 取底图字节
 
-请求头：`X-BF-Room-Pwd`。响应 `200` 为原始字节，响应头：
+请求头：`X-BF-Room-Pwd`。响应 `200` 为图片字节，响应头：
 
-- `Content-Type: <底图 MIME>`
+- `Content-Type: <这一份的 MIME>`
 - `X-BF-Base-Name: <percent-encoded UTF-8 文件名>`（响应头不允许非 ASCII，前端 `decodeURIComponent` 解回）
+- `X-BF-Base-Variant: full | preview` —— 告诉前端这一份是原图还是预览
 - `X-Content-Type-Options: nosniff`
 - `Cache-Control: private, max-age=60`
 
+**按角色分发**：
+
+| 角色 | 拿到的字节 |
+| :-- | :-- |
+| `admin` | 原图（换底图与导出都依赖原始像素） |
+| `editor` | 预览图（长边 `BF_BASE_PREVIEW_MAX_EDGE`，WebP 优先） |
+
+预览缺失时（老房间没回填 / 生成失败 / 动图 / 该配置为 0）**退回原图**，绝不报错，
+此时 `X-BF-Base-Variant` 为 `full`。动图刻意不生成预览：抽一帧是内容不一致，不只是清晰度差异。
+
 草稿态（底图未上传）返回 `409`。
+
+> ⚠️ **坐标空间不随预览改变**
+>
+> `doc.width/height` 与 `baseImage.width/height` **永远是原图尺寸**，
+> 预览图只是按同一比例缩小的像素源。前端把预览按 `cover` 铺满同一个画布盒子，
+> 与用原图渲染逐像素对齐，头像坐标因此不需要任何换算。
+> 反过来，一旦让 `doc` 跟着预览变，服务端存的原图像素坐标就会被解释成另一套刻度，
+> 所有人的头像位置整体错位 —— 这是这个特性唯一不能碰的约束。
 
 ### 2.7 `GET /api/health`
 
@@ -150,6 +176,7 @@
   "expiryDays": [3, 7, 14],
   "maxLayers": 512,
   "maxBaseImageBytes": 52428800,
+  "basePreviewMaxEdge": 2048,
   "maxSkinDataUrlChars": 5000000,
   "maxJsonBodyBytes": 67108864,
   "maxDocSize": 16384,
@@ -187,6 +214,7 @@
 | `BF_MAX_LAYERS` | 512 | 512 | 一间房最多多少行头像（**按房间累计**，超了整批 400） |
 | `BF_MAX_SKIN_DATA_URL_CHARS` | 5000000 | 1500000 | 单条内嵌皮肤 data URI 字符数 |
 | `BF_MAX_BASE_IMAGE_BYTES` | 52428800 (50MiB) | 10485760 | 底图字节上限 |
+| `BF_BASE_PREVIEW_MAX_EDGE` | 2048 | — | 预览底图长边上限（像素）；`0` = 关闭预览，所有人拿原图 |
 | `BF_MAX_DOC_SIZE` | 16384 | 8192 | 画布边长上限 |
 | `BF_MAX_POSITION` | 100000 | 32768 | 图层坐标绝对值上限 |
 | `BF_MIN_LAYER_SIZE` / `BF_MAX_LAYER_SIZE` | 16 / 16384 | 16 / 4096 | 图层尺寸区间（上界 = 画布边长） |

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from urllib.parse import quote
 
@@ -32,6 +33,7 @@ from starlette.datastructures import FormData, UploadFile
 # starlette 版本由 uv.lock 钉死，所以这个内部接口的形态是确定的。
 from starlette.formparsers import MultiPartException, MultiPartParser
 
+from .config import Settings
 from .errors import ApiError, ROOM_NOT_FOUND, json_response, password_of
 from .normalize import (
     ext_for_content_type,
@@ -39,6 +41,7 @@ from .normalize import (
     normalize_doc_size,
     sniff_image_type,
 )
+from .previews import render_preview
 from .rooms import get_db, get_settings, require_room
 from .security import authenticate, now_ms
 from .storage import (
@@ -47,10 +50,14 @@ from .storage import (
     base_image_path,
     cleanup_base_backups,
     orphan_base_files,
+    preview_files,
+    preview_image_path,
     rollback_base_files,
 )
 
 __all__ = ["router"]
+
+log = logging.getLogger("bfp.base")
 
 router = APIRouter(prefix="/api/rooms", tags=["base"])
 
@@ -92,6 +99,29 @@ async def _read_form(request: Request, limit: int) -> FormData:
         raise ApiError(400, f"请求体不是合法的 multipart 表单（{exc}）") from None
 
 
+def _drop_previews(settings: Settings, room_id: str) -> None:
+    """删掉这间房残留的预览文件（预览生成失败时用：宁可退回原图，也不留旧图的预览）"""
+    for stale in preview_files(settings, room_id):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+
+
+def _base_headers(name: str, variant: str) -> dict[str, str]:
+    return {
+        # 响应头不允许非 ASCII：文件名 percent-encoding，前端 decodeURIComponent 解回来
+        # safe="" 是为了把 "/" 也编码掉，与旧实现的 encodeURIComponent 一致
+        "X-BF-Base-Name": quote(name, safe=""),
+        # 白名单之外不让浏览器猜类型：避免上传内容被当成可执行文档
+        "X-Content-Type-Options": "nosniff",
+        # 告诉前端这一份到底是原图还是预览。坐标空间不靠它 ——
+        # 画布尺寸永远来自快照的 doc，这里只是给 UI 一句实话。
+        "X-BF-Base-Variant": variant,
+        "Cache-Control": "private, max-age=60",
+    }
+
+
 def _format_mb(size: int) -> str:
     if size % (1024 * 1024) == 0:
         return f"{size // (1024 * 1024)}MB"
@@ -103,10 +133,25 @@ async def get_base(request: Request, room_id: str) -> FileResponse:
     settings = get_settings(request)
     db = get_db(request)
     meta, base_row = await require_room(request, room_id)
-    await authenticate(db, settings, meta, password_of(request))
+    role = await authenticate(db, settings, meta, password_of(request))
 
     if base_row is None or base_row["status"] != "ready":
         raise ApiError(409, "底图尚未上传完成")
+
+    # 除管理员外都只拿预览：这是"服务器带宽小"最直接的解法，
+    # 而管理员要负责换底图与导出，必须拿到原始像素。
+    # 预览缺失（老房间没回填 / 生成失败 / 动图）时退回原图 —— 正确性优先于省流量。
+    if role != "admin" and settings.base_preview_max_edge > 0:
+        preview_ext = base_row["preview_ext"]
+        if preview_ext:
+            preview_path = preview_image_path(settings, meta["room_id"], preview_ext)
+            if preview_path.is_file():
+                return FileResponse(
+                    preview_path,
+                    media_type=base_row["preview_type"],
+                    headers=_base_headers(base_row["name"], "preview"),
+                )
+
     path = base_image_path(settings, meta["room_id"], base_row["ext"])
     if not path.is_file():
         raise ApiError(404, "底图文件丢失")
@@ -114,14 +159,7 @@ async def get_base(request: Request, room_id: str) -> FileResponse:
     return FileResponse(
         path,
         media_type=base_row["type"],
-        headers={
-            # 响应头不允许非 ASCII：文件名 percent-encoding，前端 decodeURIComponent 解回来
-            # safe="" 是为了把 "/" 也编码掉，与旧实现的 encodeURIComponent 一致
-            "X-BF-Base-Name": quote(base_row["name"], safe=""),
-            # 白名单之外不让浏览器猜类型：避免上传内容被当成可执行文档
-            "X-Content-Type-Options": "nosniff",
-            "Cache-Control": "private, max-age=60",
-        },
+        headers=_base_headers(base_row["name"], "full"),
     )
 
 
@@ -184,9 +222,12 @@ async def upload_base(request: Request, room_id: str) -> JSONResponse:
         committed = True
         updated_at = now_ms()
         async with db.transaction() as conn:
+            # preview_* 一起清空：旧预览属于旧图，留着就会被当成新图的预览发出去。
+            # 新预览在事务提交之后才生成（解码缩放是慢活，不该占着写锁）。
             cursor = await conn.execute(
                 "UPDATE room_base SET ext = ?, type = ?, name = ?, width = ?, height = ?, status = 'ready', "
-                "updated_at = ? WHERE room_id = ?",
+                "updated_at = ?, preview_ext = NULL, preview_type = NULL, preview_width = NULL, "
+                "preview_height = NULL WHERE room_id = ?",
                 (ext, content_type, name, width, height, updated_at, meta["room_id"]),
             )
             if cursor.rowcount != 1:
@@ -208,10 +249,44 @@ async def upload_base(request: Request, room_id: str) -> JSONResponse:
         except OSError:
             pass
 
+    # 预览是"锦上添花"：生成失败就退回原图，绝不能让一次成功的上传变成 500。
+    preview: dict[str, int] | None = None
+    try:
+        result = await asyncio.to_thread(
+            render_preview,
+            base_image_path(settings, meta["room_id"], ext),
+            settings,
+            meta["room_id"],
+        )
+    except Exception:  # noqa: BLE001 —— 预览出任何岔子都不该影响这次上传
+        log.warning("房间 %s 的预览生成失败，本次不提供预览", meta["room_id"], exc_info=True)
+        result = None
+
+    if result is not None:
+        try:
+            async with db.transaction() as conn:
+                # updated_at 做守卫：万一这期间又有人换了底图，别把旧图的预览尺寸写上去
+                await conn.execute(
+                    "UPDATE room_base SET preview_ext = ?, preview_type = ?, preview_width = ?, "
+                    "preview_height = ? WHERE room_id = ? AND updated_at = ?",
+                    (result.ext, result.mime, result.width, result.height, meta["room_id"], updated_at),
+                )
+            preview = {"width": result.width, "height": result.height}
+        except Exception:  # noqa: BLE001 —— 同上，元数据写不进去也只是没有预览
+            log.warning("房间 %s 的预览元数据写入失败", meta["room_id"], exc_info=True)
+    else:
+        await asyncio.to_thread(_drop_previews, settings, meta["room_id"])
+
     return json_response(
         {
             "ok": True,
             "doc": {"width": width, "height": height},
-            "baseImage": {"name": name, "type": content_type, "width": width, "height": height},
+            "baseImage": {
+                "name": name,
+                "type": content_type,
+                "width": width,
+                "height": height,
+                "preview": preview,
+            },
         }
     )

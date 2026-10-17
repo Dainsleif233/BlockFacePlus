@@ -18,8 +18,15 @@ export interface RoomDoc {
 export interface RoomBaseImage {
   name: string;
   type: string;
+  /**
+   * 原图尺寸 —— 这就是画布坐标空间。
+   * 非管理员拿到的像素源可能是缩小过的预览图，但这里永远是原图尺寸：
+   * 头像坐标只跟它对齐，一旦让 width/height 跟着预览变，所有人的头像都会错位。
+   */
   width: number;
   height: number;
+  /** 预览图尺寸；null = 服务器没给预览（老房间 / 动图 / 已关闭），所有人拿原图 */
+  preview: { width: number; height: number } | null;
 }
 
 /**

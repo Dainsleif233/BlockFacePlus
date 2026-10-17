@@ -24,6 +24,7 @@ from typing import Any
 
 from .config import DEFAULT_VERSION, Settings
 from .db import Database
+from .previews import render_preview
 from .security import now_ms
 from .storage import base_image_path
 from .sweep import SweepResult, delete_room, sweep_once, sweep_preview
@@ -77,6 +78,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_sweep = sub.add_parser("sweep", parents=[common], help="立即清扫过期房间与超时草稿房")
     p_sweep.add_argument("--dry-run", action="store_true", help="只统计会删哪些，不真的删")
+
+    p_previews = sub.add_parser("previews", parents=[common], help="为已有房间补生成预览底图")
+    p_previews.add_argument("--dry-run", action="store_true", dest="dry_run", help="只统计需要补几间，不真的生成")
+    p_previews.add_argument("--force", action="store_true", help="连已经有预览的房间也重建一遍")
     return parser
 
 
@@ -152,6 +157,17 @@ async def _cmd_inspect(db: Database, settings: Settings, args: argparse.Namespac
                 "path": str(file_path),
                 "exists": file_path.is_file(),
                 "bytes": file_path.stat().st_size if file_path.is_file() else 0,
+                # 预览是给非管理员的：这里一并回出来，方便判断"老房间要不要跑 previews"
+                "preview": (
+                    {
+                        "ext": base_row["preview_ext"],
+                        "type": base_row["preview_type"],
+                        "width": base_row["preview_width"],
+                        "height": base_row["preview_height"],
+                    }
+                    if base_row["preview_ext"]
+                    else None
+                ),
             }
             if base_row is not None
             else None
@@ -189,6 +205,11 @@ async def _cmd_inspect(db: Database, settings: Settings, args: argparse.Namespac
     else:
         state = f"{base_info['bytes']} 字节" if base_info["exists"] else "文件缺失（库里指针还在）"
         print(f"  底图       {base_info['name']} [{base_info['type']}] -> {base_info['path']} ({state})")
+        preview_info = base_info["preview"]
+        if preview_info is None:
+            print("  预览       无（非管理员也拿原图）")
+        else:
+            print(f"  预览       {preview_info['width']}x{preview_info['height']} [{preview_info['type']}]")
     throttle_info = payload["throttle"]
     if throttle_info is None:
         print("  限流       无失败记录")
@@ -219,6 +240,54 @@ async def _cmd_sweep(db: Database, settings: Settings, args: argparse.Namespace)
     return 0
 
 
+async def _cmd_previews(db: Database, settings: Settings, args: argparse.Namespace) -> int:
+    """给已有房间补预览图。
+
+    加预览是纯增量功能：老房间的 preview_* 是 NULL，非管理员会直接拿原图。
+    不跑这个命令功能不会坏，只是省不下老房间的带宽。
+    """
+    if settings.base_preview_max_edge <= 0:
+        print("BF_BASE_PREVIEW_MAX_EDGE = 0（预览已关闭），无需补生成")
+        return 0
+
+    rows = await db.fetchall(
+        "SELECT room_id, ext, preview_ext FROM room_base WHERE status = 'ready' ORDER BY room_id"
+    )
+    pending = [row for row in rows if args.force or not row["preview_ext"]]
+    if args.dry_run:
+        print(f"[dry-run] 共 {len(rows)} 间已就绪房间，其中 {len(pending)} 间需要补预览")
+        return 0
+
+    done = skipped = missing = failed = 0
+    for row in pending:
+        room_id = row["room_id"]
+        source = base_image_path(settings, room_id, row["ext"])
+        if not source.is_file():
+            missing += 1
+            print(f"  {room_id}：原图文件缺失，跳过", file=sys.stderr)
+            continue
+        try:
+            result = await asyncio.to_thread(render_preview, source, settings, room_id)
+        except Exception:  # noqa: BLE001 —— 一间房失败不该让整批复停下
+            failed += 1
+            print(f"  {room_id}：生成失败", file=sys.stderr)
+            continue
+        if result is None:
+            skipped += 1
+            continue
+        async with db.transaction() as conn:
+            await conn.execute(
+                "UPDATE room_base SET preview_ext = ?, preview_type = ?, preview_width = ?, "
+                "preview_height = ? WHERE room_id = ?",
+                (result.ext, result.mime, result.width, result.height, room_id),
+            )
+        done += 1
+        print(f"  {room_id}：{result.width}x{result.height} {result.ext}")
+
+    print(f"补生成完成：成功 {done} 间，跳过 {skipped} 间，文件缺失 {missing} 间，失败 {failed} 间")
+    return 0 if failed == 0 and missing == 0 else 1
+
+
 async def _dispatch(args: argparse.Namespace, settings: Settings) -> int:
     settings.base_dir.mkdir(parents=True, exist_ok=True)
     db = Database(settings.db_path)
@@ -232,6 +301,8 @@ async def _dispatch(args: argparse.Namespace, settings: Settings) -> int:
             return await _cmd_delete(db, settings, args)
         if args.command == "sweep":
             return await _cmd_sweep(db, settings, args)
+        if args.command == "previews":
+            return await _cmd_previews(db, settings, args)
         return 2
     finally:
         await db.close()

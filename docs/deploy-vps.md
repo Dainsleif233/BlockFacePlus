@@ -141,6 +141,7 @@ sudo systemctl restart blockface-plus-api
 | `BF_MAX_LAYERS` | `512` | 一间房最多多少行头像（与旧云函数版本一致）。这个值决定一次进房要读多少行，影响的是**进房速度**而不是容量。 |
 | `BF_MAX_SKIN_DATA_URL_CHARS` | `5000000` | 单条内嵌皮肤的 data URI 字符数（旧版本 1500000）。皮肤是内嵌在行里的，加大它等于加大数据库（与每次进房的响应体）。 |
 | `BF_MAX_BASE_IMAGE_BYTES` | `52428800`（50MiB） | 底图字节上限（旧版本 10MiB）。**改大必须同步改反代的请求体上限**（nginx `client_max_body_size` / Caddy `request_body max_size`）。 |
+| `BF_BASE_PREVIEW_MAX_EDGE` | `2048` | 预览底图的长边上限（像素），`0` = 关闭预览。除管理员外所有人下载底图拿到的是按它缩放的预览版，**这是小带宽 VPS 上最有效的一条**：底图从几十 MiB 降到几百 KB。预览只是像素源，画布坐标空间永远是原图尺寸，改它不会挪动任何头像。老房间用 `bfp-ops previews` 回填（见 §7.3）。 |
 | `BF_MAX_JSON_BODY_BYTES` | `67108864`（64MiB） | JSON 请求体上限（旧云函数版本受平台硬限只有 6MiB）。它是两个上限里较大的那个，反代的请求体上限要 ≥ 它；超限时反代若先拦会回纯文本 413，后端拦才是 `{"error": "请求体太大"}`。 |
 | `BF_MAX_DOC_SIZE` | `16384` | 画布边长上限（旧版本 8192）。 |
 | `BF_MAX_POSITION` | `100000` | 图层坐标绝对值上限（旧版本 32768）。 |
@@ -493,6 +494,7 @@ sudo -u blockface env BF_DATA_DIR=/var/lib/blockface-plus HOME=/home/blockface \
 | `inspect <房间号> [--json]` | 看一间房的详情：画布、头像行数、两把密码的长度、**底图指针指向的文件是否真的在盘上**、以及当前限流状态（失败次数与锁定到什么时候） | 用户说「我的房间打不开」，先看数据本身 |
 | `delete <房间号> --yes` | 删除房间（连同它的底图字节） | 房间号泄露了、或要立刻腾空间 |
 | `sweep [--dry-run]` | 立即清扫：已过期房间 + 超过 `BF_DRAFT_TTL_SECONDS` 仍没传底图的草稿房 | `BF_SWEEP_INTERVAL_SECONDS=0` 时手工兜底；`--dry-run` 只统计不删 |
+| `previews [--dry-run] [--force]` | 给已有房间补生成预览底图（长边 `BF_BASE_PREVIEW_MAX_EDGE`） | 升级到带预览的版本后跑一次；`--force` 会连已有预览的一起重做（改了长边上限时用） |
 
 几条使用要点：
 
@@ -504,6 +506,8 @@ sudo -u blockface env BF_DATA_DIR=/var/lib/blockface-plus HOME=/home/blockface \
 - 退出码：`0` 成功；`delete` 少了 `--yes`（2）或房间不存在（1）返回非 0，
   所以可以放心写进脚本用 `&&` 串起来。
 - 它固定只动 `{BF_DATA_DIR}/bfp.sqlite3` 与 `{BF_DATA_DIR}/base/` 这两处，不会碰到别的路径。
+- 预览图在 `{BF_DATA_DIR}/base/preview/` 子目录里，跟着房间一起删；单独删了某个预览文件也不会有事 ——
+  非管理员会退回拿原图，再跑一次 `bfp-ops previews` 就补回来了。
 
 ### 7.4 升级
 

@@ -93,6 +93,31 @@ describe('API_BASE 前缀', () => {
   });
 });
 
+describe('fetchBase', () => {
+  function binaryStub(headers: Record<string, string>) {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(new Blob(['png']), { status: 200, headers }))));
+  }
+
+  it('服务端标了 preview 就如实回报 —— 只影响提示文案，坐标空间仍由 doc 决定', async () => {
+    binaryStub({
+      'X-BF-Base-Variant': 'preview',
+      'Content-Type': 'image/webp',
+      'X-BF-Base-Name': encodeURIComponent('我的底图.png'),
+    });
+    const base = await collabApi.fetchBase('r1', 'pw');
+    expect(base.variant).toBe('preview');
+    expect(base.type).toBe('image/webp');
+    expect(base.name).toBe('我的底图.png');
+  });
+
+  it('没有变体头就按原图算：宁可少说一句预览，也不能谎称是预览', async () => {
+    binaryStub({ 'Content-Type': 'image/png' });
+    const base = await collabApi.fetchBase('r1', 'pw');
+    expect(base.variant).toBe('full');
+    expect(base.name).toBe('底图');
+  });
+});
+
 describe('uploadBase', () => {
   const meta = { name: '底图.png', type: 'image/png', width: 1920, height: 1080 };
   const okBody = { ok: true, doc: { width: 1920, height: 1080 }, baseImage: meta };

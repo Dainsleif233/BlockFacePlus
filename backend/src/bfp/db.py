@@ -24,6 +24,28 @@ __all__ = ["SCHEMA_PATH", "Database"]
 SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
 
 
+# 旧库升级：schema.sql 里的 CREATE TABLE IF NOT EXISTS 对**已存在**的表不会生效，
+# 所以新增列必须在这里补一次 ALTER TABLE，否则升级后第一次查 preview_* 就是
+# "no such column"，整个服务起不来。只加列、不改不删，向前兼容。
+_ADDED_COLUMNS: dict[str, dict[str, str]] = {
+    "room_base": {
+        "preview_ext": "TEXT",
+        "preview_type": "TEXT",
+        "preview_width": "INTEGER",
+        "preview_height": "INTEGER",
+    },
+}
+
+
+async def _migrate(conn: aiosqlite.Connection) -> None:
+    for table, columns in _ADDED_COLUMNS.items():
+        async with conn.execute(f"PRAGMA table_info({table})") as cursor:
+            existing = {row["name"] for row in await cursor.fetchall()}
+        for name, sql_type in columns.items():
+            if name not in existing:
+                await conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
+
+
 class Database:
     """一个进程一个实例，挂在 app.state.db 上"""
 
@@ -51,6 +73,7 @@ class Database:
         await conn.execute("PRAGMA foreign_keys=ON")
         await conn.execute("PRAGMA synchronous=NORMAL")
         await conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+        await _migrate(conn)
         self._conn = conn
 
     async def close(self) -> None:

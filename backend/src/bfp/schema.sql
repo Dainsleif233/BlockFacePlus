@@ -35,7 +35,15 @@ CREATE TABLE IF NOT EXISTS room_base (
   width      INTEGER NOT NULL,
   height     INTEGER NOT NULL,
   status     TEXT    NOT NULL CHECK (status IN ('draft', 'ready')),
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  -- 预览底图（非管理员下载的那一份）：前缀 + MIME + 尺寸。
+  -- 四个字段要么同时有值、要么同时为 NULL（NULL = 没有预览，退回原图）。
+  -- 注意 width/height 仍然只描述**原图**：预览是按同一比例缩小的像素源，
+  -- 绝不能拿它的尺寸去当坐标空间，否则头像位置会整体错位。
+  preview_ext    TEXT,
+  preview_type   TEXT,
+  preview_width  INTEGER,
+  preview_height INTEGER
 );
 
 -- 草稿房超时清扫要按状态捞

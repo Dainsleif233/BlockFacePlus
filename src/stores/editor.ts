@@ -1190,11 +1190,17 @@ export async function loadRoomDocument(
     const baseId = createId('base');
     baseImages.set(baseId, baseLoaded.element);
     baseFiles.set(baseId, baseFile);
+    // 底图元数据里的宽高 = **画布坐标空间**，必须取服务端给的 doc，而不是图片自身的
+    // naturalWidth/Height：非管理员拿到的是一张缩小过的预览图，拿它的尺寸当坐标空间
+    // 会让整间房的头像位置整体错位（服务端存的是原图像素坐标）。
+    // 预览只是像素源，按 cover 铺满同一个画布盒子，画出来与用原图逐像素对齐。
+    const docWidth = doc.width > 0 ? doc.width : baseLoaded.width;
+    const docHeight = doc.height > 0 ? doc.height : baseLoaded.height;
     baseMeta.set(baseId, {
       id: baseId,
       name: baseFile.name.replace(/\.[^.]+$/, '') || '底图',
-      width: baseLoaded.width,
-      height: baseLoaded.height,
+      width: docWidth,
+      height: docHeight,
       tainted: baseLoaded.tainted,
     });
 

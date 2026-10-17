@@ -20,6 +20,7 @@ from pathlib import Path
 from .config import Settings
 
 __all__ = [
+    "PREVIEW_DIR_NAME",
     "StagedBaseImage",
     "base_image_path",
     "backup_base_files",
@@ -27,6 +28,9 @@ __all__ = [
     "delete_room_files",
     "find_base_image",
     "orphan_base_files",
+    "preview_dir",
+    "preview_files",
+    "preview_image_path",
     "rollback_base_files",
 ]
 
@@ -41,6 +45,30 @@ def base_dir(settings: Settings) -> Path:
 
 def base_image_path(settings: Settings, room_id: str, ext: str) -> Path:
     return settings.base_dir / f"{room_id}.{ext.lower()}"
+
+
+# 预览图放在 base/ 的子目录里，而不是 base/{roomId}.preview.{ext}：
+# 后者会被 base_image_path 旁边那些 "{roomId}.*" 的 glob（orphan_base_files、
+# backup_base_files、find_base_image）当成"另一种后缀的原图"，
+# 于是换底图时被当孤儿删掉、回滚时被当原图恢复，语义全乱。
+# 放进子目录后，原图那套逻辑完全看不到它，互不干扰。
+PREVIEW_DIR_NAME = "preview"
+
+
+def preview_dir(settings: Settings) -> Path:
+    return settings.base_dir / PREVIEW_DIR_NAME
+
+
+def preview_image_path(settings: Settings, room_id: str, ext: str) -> Path:
+    return preview_dir(settings) / f"{room_id}.{ext.lower()}"
+
+
+def preview_files(settings: Settings, room_id: str) -> list[Path]:
+    """这间房当前存在的预览文件（正常最多一个；换格式时可能短暂有两个）"""
+    directory = preview_dir(settings)
+    if not directory.is_dir():
+        return []
+    return [path for path in directory.glob(f"{room_id}.*") if path.is_file()]
 
 
 def find_base_image(settings: Settings, room_id: str) -> Path | None:
@@ -130,6 +158,13 @@ def delete_room_files(settings: Settings, room_id: str) -> int:
             if candidate.is_file():
                 candidate.unlink()
                 removed += 1
+        except OSError:
+            pass
+    # 预览图在子目录里，上面的 glob 看不到，必须单独清一遍
+    for candidate in preview_files(settings, room_id):
+        try:
+            candidate.unlink()
+            removed += 1
         except OSError:
             pass
     return removed

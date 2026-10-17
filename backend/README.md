@@ -39,6 +39,7 @@ backend/
 │   ├── avatars.py          PATCH /api/rooms/{id}/avatars（差量提交）
 │   ├── base.py             GET/POST /api/rooms/{id}/base
 │   ├── sweep.py            后台清扫 + delete_room
+│   ├── previews.py         预览底图生成（Pillow 缩放，非管理员下载的那一份）
 │   ├── ops.py              bfp-ops 命令行
 │   └── errors.py           ApiError 与 {"error": "..."} 统一形状
 └── tests/                  pytest + httpx ASGITransport，每个用例独立临时数据目录
@@ -67,6 +68,9 @@ backend/
 - SQLite 开 WAL、`busy_timeout=5000`、`foreign_keys=ON`；单连接 + 写锁，所有写路径都走 `transaction()`。
 - 底图字节**不进数据库**，落 `{BF_DATA_DIR}/base/{roomId}.{ext}`；写入是"临时文件 → fsync → os.replace"，
   所以不会出现"库里指针指向半张图"。同一间房同一后缀只有一个文件，换底图会覆盖并清掉其它后缀。
+- 预览底图落 `{BF_DATA_DIR}/base/preview/{roomId}.{ext}`（默认 WebP）。刻意放进子目录：
+  原图那套 `{roomId}.*` 的 glob（孤儿清理 / 备份 / 回滚 / 删除）因此完全看不到它，两套生命周期互不干扰。
+  除管理员外，`GET /api/rooms/{id}/base` 发的是预览；预览缺失就退回原图，不会报错。
 - multipart 上传的暂存文件落 `{BF_DATA_DIR}/tmp`：starlette 把 1MB 以上的 part 滚进
   `tempfile` 的默认目录，而生产 unit 里 `PrivateTmp=true` 让 `/tmp` 是内存盘 —— 50MiB 的底图
   会白吃 50MiB 内存。启动时把 `tempfile.tempdir` 指到数据目录，顺带也就跟着 `StateDirectory` 一起被授权。
@@ -81,6 +85,7 @@ bfp-ops list [--json]                  # 所有房间：状态 / 层数 / 过期
 bfp-ops inspect <roomId> [--json]      # 单房间详情（含底图文件是否真的在盘上）
 bfp-ops delete <roomId> --yes          # 删房间（不加 --yes 直接拒绝）
 bfp-ops sweep [--dry-run]              # 立刻清扫：过期房 + 超时草稿房
+bfp-ops previews [--dry-run] [--force] # 给已有房间补预览底图（升级后跑一次）
 ```
 
 全局 `--data-dir DIR` 可覆盖 `BF_DATA_DIR`（放在子命令前或后都行）。

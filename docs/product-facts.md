@@ -121,7 +121,13 @@ view.y = view.y + offset.y * (1 - k) + (size.height * (k - 1)) / 2;
 - **写入是原子的**：先把上传字节写到 `base/` 下的隐藏临时文件（边收边写、边计数，超限立刻 413 并清掉半截文件），收完 `fsync` 再用 `os.replace` 原子换到 `{roomId}.{ext}`，最后删掉该房间其它后缀的旧图。直接往目标文件上写的话，中途崩掉库里指针就指向一张半截图，而且在下一次上传之前它"看起来一直是好的"。
 - **覆盖语义**：同一间房、同一个后缀只对应一个文件；换底图 = 覆盖同后缀文件 + 清掉不再被引用的其它后缀，不留孤儿文件（实现见 `backend/src/bfp/storage.py` 与 `backend/src/bfp/base.py`）。
 - **认类型只认字节魔数**：不信任客户端声明的 `Content-Type`，用文件头 32 字节判 PNG / JPEG / WebP / GIF。
-- **读取（`GET /api/rooms/{roomId}/base`）**：按密码鉴权，响应头带 `Content-Type`、`X-BF-Base-Name`（底图名以 percent-encoding 下发，前端 `decodeURIComponent` 解回原名，解不动回退「底图」）、`X-Content-Type-Options: nosniff` 与 `Cache-Control: private, max-age=60`；草稿态（底图还没传）返回 409。
+- **读取（`GET /api/rooms/{roomId}/base`）**：按密码鉴权，响应头带 `Content-Type`、`X-BF-Base-Name`（底图名以 percent-encoding 下发，前端 `decodeURIComponent` 解回原名，解不动回退「底图」）、`X-BF-Base-Variant`（`full` / `preview`）、`X-Content-Type-Options: nosniff` 与 `Cache-Control: private, max-age=60`；草稿态（底图还没传）返回 409。
+- **按角色分发像素**：管理员拿原图，其他角色拿预览图（长边 `BF_BASE_PREVIEW_MAX_EDGE`，默认 2048，WebP 优先）。预览在**上传成功后**由服务端生成（Pillow 解码 + LANCZOS 缩放，跑在线程池里），存在 `base/preview/` 子目录 —— 放进子目录而不是 `base/{roomId}.preview.{ext}`，是为了不被原图那套 `{roomId}.*` 的 glob（孤儿清理、备份、回滚）当成"另一种后缀的原图"。预览生成失败**不会**让上传失败：`preview` 落 `NULL`，所有人退回原图。
+- **预览不改变坐标空间（唯一的硬约束）**：`doc.width/height` 与 `baseImage.width/height` 永远是**原图**尺寸，预览只是按同一比例缩小的像素源，前端把它按 `cover` 铺满同一个画布盒子，与用原图渲染逐像素对齐。服务端存的是原图像素坐标 —— 一旦让 `doc` 跟着预览变，所有人的头像位置会整体错位。前端 `loadRoomDocument` 因此显式用 `room.doc` 写底图元数据，而不是图片的 `naturalWidth/Height`。
+- **动图不生成预览**：多帧 GIF / 动画 WebP 抽一帧给非管理员看属于**内容**不一致（不只是清晰度差异），所以直接跳过预览、退回原图。
+- **换底图作废旧预览**：`preview_*` 四列在写主字段的同一个事务里清空，新预览在提交之后生成（解码缩放是慢活，不该占着写锁）；写回览元数据时用 `updated_at` 做守卫，避免并发换图时把旧图的尺寸写上去。
+- **老房间回填**：升级前建的房间 `preview_*` 是 NULL，功能不会坏（非管理员直接拿原图），想省带宽就跑 `bfp-ops previews`。
+- **代价（要有意识地接受）**：编辑者在自己浏览器里导出时，画布底图用的是预览像素 —— 这是"省带宽"直接换来的取舍，不是 bug。状态栏会在底图尺寸后面标一句「· 预览」，需要原图画质时找管理员取。
 
 ### 4.5 密码与鉴权
 - 编辑密码 8 位、管理员密码 12 位；字符表剔除 `0/1/l/o` 等易混字符，并做拒绝采样保证均匀分布。
@@ -145,6 +151,7 @@ view.y = view.y + offset.y * (1 - k) + (size.height * (k - 1)) / 2;
 | 一间房最多多少行头像 | `BF_MAX_LAYERS` | 512 | 512 |
 | 单条内嵌皮肤 data URI 字符数 | `BF_MAX_SKIN_DATA_URL_CHARS` | 5000000 | 1500000 |
 | 底图字节上限 | `BF_MAX_BASE_IMAGE_BYTES` | 50MiB | 10MiB |
+| 预览底图长边上限 | `BF_BASE_PREVIEW_MAX_EDGE` | 2048 | —（没有预览这个概念） |
 | JSON 请求体上限 | `BF_MAX_JSON_BODY_BYTES` | 64MiB | 6MiB（平台硬限） |
 | 画布边长上限 | `BF_MAX_DOC_SIZE` | 16384 | 8192 |
 | 图层坐标绝对值上限 | `BF_MAX_POSITION` | 100000 | 32768 |

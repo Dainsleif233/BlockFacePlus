@@ -72,6 +72,8 @@ class Settings:
     max_layers: int
     max_skin_data_url_chars: int
     max_base_image_bytes: int
+    # 预览底图的长边上限（0 = 关闭预览，所有人直接拿原图）
+    base_preview_max_edge: int
     max_doc_size: int
     max_position: int
     min_layer_size: int
@@ -109,6 +111,7 @@ class Settings:
             max_layers=_env_int(source, "BF_MAX_LAYERS", 512, minimum=1),
             max_skin_data_url_chars=_env_int(source, "BF_MAX_SKIN_DATA_URL_CHARS", 5_000_000, minimum=1),
             max_base_image_bytes=_env_int(source, "BF_MAX_BASE_IMAGE_BYTES", 52_428_800, minimum=1),
+            base_preview_max_edge=_env_int(source, "BF_BASE_PREVIEW_MAX_EDGE", 2048, minimum=0),
             max_doc_size=_env_int(source, "BF_MAX_DOC_SIZE", 16_384, minimum=1),
             max_position=_env_int(source, "BF_MAX_POSITION", 100_000, minimum=0),
             min_layer_size=min_layer_size,
@@ -138,6 +141,7 @@ class Settings:
             "expiryDays": list(EXPIRY_DAYS),
             "maxLayers": self.max_layers,
             "maxBaseImageBytes": self.max_base_image_bytes,
+            "basePreviewMaxEdge": self.base_preview_max_edge,
             "maxSkinDataUrlChars": self.max_skin_data_url_chars,
             "maxJsonBodyBytes": self.max_json_body_bytes,
             "maxDocSize": self.max_doc_size,

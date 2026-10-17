@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-from conftest import _open, pwd
+from conftest import _open, png_bytes, pwd
 
 from bfp.ops import main as ops_main
 from bfp.security import now_ms
@@ -166,3 +166,26 @@ def test_ops_cli_is_usable_without_the_service_running(tmp_path, capsys):
     assert ops_main(["--data-dir", str(data_dir), "list"]) == 0
     assert "共 0 间房" in capsys.readouterr().out
     assert (data_dir / "bfp.sqlite3").exists()
+
+def test_ops_previews_backfills_existing_rooms(tmp_path, capsys):
+    """升级前建的房间 preview_* 是 NULL：跑一次 previews 就能把带宽省回来"""
+    live, _expired, _stale = seed(tmp_path)
+    data_dir = tmp_path / "data"
+
+    # seed 里传的是只够验魔数的 1x1 PNG（Pillow 解不动），这里换成真图
+    target = data_dir / "base" / f"{live}.png"
+    target.write_bytes(png_bytes(600, 300))
+
+    assert ops_main(["--data-dir", str(data_dir), "previews", "--dry-run"]) == 0
+    assert "需要补预览" in capsys.readouterr().out
+
+    assert ops_main(["--data-dir", str(data_dir), "previews"]) == 0
+    assert "补生成完成" in capsys.readouterr().out
+    assert (data_dir / "base" / "preview" / f"{live}.webp").is_file()
+
+    # 回头再跑一次：已经有预览的房间不该被重复处理
+    assert ops_main(["--data-dir", str(data_dir), "previews", "--dry-run"]) == 0
+    assert "0 间需要补预览" in capsys.readouterr().out
+
+    assert ops_main(["inspect", live, "--data-dir", str(data_dir)]) == 0
+    assert "预览       600x300" in capsys.readouterr().out

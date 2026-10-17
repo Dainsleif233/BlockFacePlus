@@ -6,8 +6,11 @@
 
 from __future__ import annotations
 
-import pytest
+from io import BytesIO
 from urllib.parse import quote
+
+import pytest
+from PIL import Image
 
 from conftest import (
     GIF_BYTES,
@@ -16,6 +19,8 @@ from conftest import (
     PNG_BYTES,
     WEBP_BYTES,
     draft,
+    gif_bytes,
+    png_bytes,
     pwd,
 )
 
@@ -84,30 +89,45 @@ async def test_base_is_conflict_until_uploaded(harness):
 
 
 async def test_upload_then_download_round_trip(harness):
-    room_id, edit, _admin = await harness.create_ok()
+    room_id, edit, admin = await harness.create_ok()
     name = "我的 底图.png"
+    content = png_bytes(800, 600)
 
-    uploaded = await harness.upload(room_id, edit, content=PNG_BYTES, name=name, width=800, height=600)
+    uploaded = await harness.upload(room_id, edit, content=content, name=name, width=800, height=600)
     assert uploaded.status_code == 200, uploaded.text
-    assert uploaded.json() == {
-        "ok": True,
-        "doc": {"width": 800, "height": 600},
-        "baseImage": {"name": name, "type": "image/png", "width": 800, "height": 600},
+    payload = uploaded.json()
+    assert payload["ok"] is True
+    assert payload["doc"] == {"width": 800, "height": 600}
+    assert payload["baseImage"] == {
+        "name": name,
+        "type": "image/png",
+        "width": 800,
+        "height": 600,
+        # 800x600 没超过默认长边 2048，预览与原图同尺寸（只做了重编码，好压体积）
+        "preview": {"width": 800, "height": 600},
     }
     # 同一间房同一后缀只有一个文件
     assert harness.base_files(room_id) == [f"{room_id}.png"]
 
     room = (await harness.client.get(f"/api/rooms/{room_id}", headers=pwd(edit))).json()["room"]
     assert room["status"] == "ready"
-    assert room["baseImage"] == {"name": name, "type": "image/png", "width": 800, "height": 600}
+    assert room["baseImage"] == {
+        "name": name,
+        "type": "image/png",
+        "width": 800,
+        "height": 600,
+        "preview": {"width": 800, "height": 600},
+    }
     assert room["doc"] == {"width": 800, "height": 600}
 
-    downloaded = await harness.client.get(f"/api/rooms/{room_id}/base", headers=pwd(edit))
+    # 管理员拿到的是原图字节
+    downloaded = await harness.client.get(f"/api/rooms/{room_id}/base", headers=pwd(admin))
     assert downloaded.status_code == 200
-    assert downloaded.content == PNG_BYTES
+    assert downloaded.content == content
     assert downloaded.headers["content-type"] == "image/png"
     assert downloaded.headers["x-content-type-options"] == "nosniff"
     assert downloaded.headers["cache-control"] == "private, max-age=60"
+    assert downloaded.headers["x-bf-base-variant"] == "full"
     # 响应头不能是非 ASCII，所以文件名 percent-encoding（safe="" 连 / 也编码，与前端 decodeURIComponent 对齐）
     assert downloaded.headers["x-bf-base-name"] == quote(name, safe="")
 
@@ -352,3 +372,170 @@ async def test_avatar_rows_survive_base_upload(harness):
     assert (await harness.upload(room_id, admin)).status_code == 200
     after = (await harness.client.get(f"/api/rooms/{room_id}", headers=pwd(admin))).json()["avatars"]
     assert after == before
+
+# --------------------------------------------------------------------------- #
+# 预览底图（方案二）：除管理员外都只拿缩小版
+#
+# 这一组用例守的是同一件事：**坐标空间不许跟着预览变**。
+# 预览只是像素源，room_base.width/height 与快照的 doc 永远是原图尺寸 ——
+# 一旦 doc 变成 256x192，所有人的头像坐标就会整体错位。
+# --------------------------------------------------------------------------- #
+
+
+async def test_non_admin_gets_a_downscaled_preview(open_harness, tmp_path):
+    async with open_harness(tmp_path, BF_BASE_PREVIEW_MAX_EDGE="256") as harness:
+        room_id, edit, admin = await harness.create_ok()
+        content = png_bytes(1024, 768)
+
+        uploaded = await harness.upload(room_id, admin, content=content, width=1024, height=768)
+        assert uploaded.status_code == 200, uploaded.text
+        assert uploaded.json()["baseImage"]["preview"] == {"width": 256, "height": 192}
+        # 上传回执里的 doc 仍然是原图尺寸
+        assert uploaded.json()["doc"] == {"width": 1024, "height": 768}
+
+        room = (await harness.client.get(f"/api/rooms/{room_id}", headers=pwd(edit))).json()["room"]
+        assert room["doc"] == {"width": 1024, "height": 768}
+        assert room["baseImage"]["width"] == 1024
+        assert room["baseImage"]["height"] == 768
+        assert room["baseImage"]["preview"] == {"width": 256, "height": 192}
+
+        # 管理员：原图字节一模一样
+        admin_download = await harness.client.get(f"/api/rooms/{room_id}/base", headers=pwd(admin))
+        assert admin_download.status_code == 200
+        assert admin_download.headers["x-bf-base-variant"] == "full"
+        assert admin_download.content == content
+
+        # 编辑者：缩小后的 WebP
+        editor_download = await harness.client.get(f"/api/rooms/{room_id}/base", headers=pwd(edit))
+        assert editor_download.status_code == 200
+        assert editor_download.headers["x-bf-base-variant"] == "preview"
+        assert editor_download.headers["content-type"] == "image/webp"
+        assert len(editor_download.content) < len(content)
+        with Image.open(BytesIO(editor_download.content)) as image:
+            assert image.size == (256, 192)
+
+
+async def test_preview_keeps_the_original_aspect_ratio(open_harness, tmp_path):
+    """短边必须由原比例推出来：写死比例会让头像在预览图上整体偏移"""
+    async with open_harness(tmp_path, BF_BASE_PREVIEW_MAX_EDGE="200") as harness:
+        room_id, _edit, admin = await harness.create_ok()
+
+        landscape = await harness.upload(room_id, admin, content=png_bytes(1000, 333), width=1000, height=333)
+        assert landscape.status_code == 200, landscape.text
+        preview = landscape.json()["baseImage"]["preview"]
+        assert preview["width"] == 200
+        assert abs(preview["height"] - 333 * 200 / 1000) <= 1
+
+        portrait = await harness.upload(room_id, admin, content=png_bytes(333, 1000), width=333, height=1000)
+        assert portrait.status_code == 200, portrait.text
+        preview = portrait.json()["baseImage"]["preview"]
+        assert preview["height"] == 200
+        assert abs(preview["width"] - 333 * 200 / 1000) <= 1
+
+
+async def test_preview_can_be_switched_off(open_harness, tmp_path):
+    """BF_BASE_PREVIEW_MAX_EDGE=0：不生成预览，所有人（含编辑者）都拿原图"""
+    async with open_harness(tmp_path, BF_BASE_PREVIEW_MAX_EDGE="0") as harness:
+        room_id, edit, admin = await harness.create_ok()
+        content = png_bytes(1024, 768)
+
+        uploaded = await harness.upload(room_id, admin, content=content, width=1024, height=768)
+        assert uploaded.status_code == 200, uploaded.text
+        assert uploaded.json()["baseImage"]["preview"] is None
+
+        room = (await harness.client.get(f"/api/rooms/{room_id}", headers=pwd(edit))).json()["room"]
+        assert room["baseImage"]["preview"] is None
+
+        for password in (edit, admin):
+            downloaded = await harness.client.get(f"/api/rooms/{room_id}/base", headers=pwd(password))
+            assert downloaded.headers["x-bf-base-variant"] == "full"
+            assert downloaded.content == content
+
+
+async def test_room_without_preview_falls_back_to_the_full_image(open_harness, tmp_path):
+    """老房间（加预览之前建的）没有预览：宁可用原图，也不许报错"""
+    async with open_harness(tmp_path, BF_BASE_PREVIEW_MAX_EDGE="256") as harness:
+        room_id, edit, admin = await harness.create_ok()
+        content = png_bytes(1024, 768)
+        assert (await harness.upload(room_id, admin, content=content, width=1024, height=768)).status_code == 200
+
+        # 模拟"升级前就存在、还没跑 previews 回填"的房间
+        async with harness.db.transaction() as conn:
+            await conn.execute(
+                "UPDATE room_base SET preview_ext = NULL, preview_type = NULL, "
+                "preview_width = NULL, preview_height = NULL WHERE room_id = ?",
+                (room_id,),
+            )
+        for stale in (harness.data_dir / "base" / "preview").glob(f"{room_id}.*"):
+            stale.unlink()
+
+        downloaded = await harness.client.get(f"/api/rooms/{room_id}/base", headers=pwd(edit))
+        assert downloaded.status_code == 200
+        assert downloaded.headers["x-bf-base-variant"] == "full"
+        assert downloaded.content == content
+
+
+async def test_replacing_the_base_rebuilds_the_preview(open_harness, tmp_path):
+    async with open_harness(tmp_path, BF_BASE_PREVIEW_MAX_EDGE="128") as harness:
+        room_id, edit, admin = await harness.create_ok()
+
+        first = png_bytes(512, 512, (10, 20, 30))
+        assert (await harness.upload(room_id, admin, content=first, width=512, height=512)).status_code == 200
+
+        second = png_bytes(256, 128, (200, 100, 50))
+        uploaded = await harness.upload(room_id, admin, content=second, width=256, height=128)
+        assert uploaded.status_code == 200, uploaded.text
+        assert uploaded.json()["baseImage"]["preview"] == {"width": 128, "height": 64}
+
+        # 预览目录里一间房只留一个文件，旧的那份不能变成孤儿
+        assert sorted(path.name for path in (harness.data_dir / "base" / "preview").iterdir()) == [f"{room_id}.webp"]
+
+        downloaded = await harness.client.get(f"/api/rooms/{room_id}/base", headers=pwd(edit))
+        assert downloaded.headers["x-bf-base-variant"] == "preview"
+        with Image.open(BytesIO(downloaded.content)) as image:
+            assert image.size == (128, 64)
+
+
+async def test_animated_gif_gets_no_preview(open_harness, tmp_path):
+    """动图抽一帧就是内容不一致，不只是清晰度差：直接不生成预览"""
+    async with open_harness(tmp_path, BF_BASE_PREVIEW_MAX_EDGE="64") as harness:
+        room_id, edit, admin = await harness.create_ok()
+        content = gif_bytes(200, 200, frames=2)
+
+        uploaded = await harness.upload(
+            room_id, admin, content=content, filename="base.gif", width=200, height=200
+        )
+        assert uploaded.status_code == 200, uploaded.text
+        assert uploaded.json()["baseImage"]["preview"] is None
+
+        downloaded = await harness.client.get(f"/api/rooms/{room_id}/base", headers=pwd(edit))
+        assert downloaded.headers["x-bf-base-variant"] == "full"
+        assert downloaded.content == content
+
+
+async def test_undecodable_image_still_uploads_without_a_preview(open_harness, tmp_path):
+    """魔数对、像素坏：预览生成失败也不能把一次成功的上传变成 500"""
+    async with open_harness(tmp_path, BF_BASE_PREVIEW_MAX_EDGE="64") as harness:
+        room_id, edit, admin = await harness.create_ok()
+        # PNG 魔数 + 垃圾数据：sniff_image_type 认，Pillow 解不动
+        content = PNG_BYTES + b"garbage"
+
+        uploaded = await harness.upload(room_id, admin, content=content, width=200, height=200)
+        assert uploaded.status_code == 200, uploaded.text
+        assert uploaded.json()["baseImage"]["preview"] is None
+
+        downloaded = await harness.client.get(f"/api/rooms/{room_id}/base", headers=pwd(edit))
+        assert downloaded.status_code == 200
+        assert downloaded.headers["x-bf-base-variant"] == "full"
+        assert downloaded.content == content
+
+
+async def test_delete_room_also_removes_preview_files(open_harness, tmp_path):
+    async with open_harness(tmp_path, BF_BASE_PREVIEW_MAX_EDGE="128") as harness:
+        room_id, _edit, admin = await harness.create_ok()
+        assert (await harness.upload(room_id, admin, content=png_bytes(512, 512), width=512, height=512)).status_code == 200
+        preview_dir = harness.data_dir / "base" / "preview"
+        assert list(preview_dir.iterdir()) != []
+
+        assert (await harness.client.delete(f"/api/rooms/{room_id}", headers=pwd(admin))).status_code == 200
+        assert list(preview_dir.iterdir()) == []

@@ -49,6 +49,11 @@ interface CollabState {
   /** 进房装载文档时的遮罩态 */
   busyLoading: boolean;
   publishOpen: boolean;
+  /**
+   * 当前画布上的底图是不是服务器发的预览版（非管理员默认是）。
+   * 只用于给用户一句实话 —— 坐标空间与它无关，永远是快照里的 doc。
+   */
+  basePreview: boolean;
 }
 
 const state = reactive<CollabState>({
@@ -61,6 +66,7 @@ const state = reactive<CollabState>({
   submitting: false,
   busyLoading: false,
   publishOpen: false,
+  basePreview: false,
 });
 
 /**
@@ -163,6 +169,9 @@ async function enterRoom(password: string): Promise<void> {
     }
 
     const base = await collabApi.fetchBase(state.roomId, password);
+    // 记下这一份是预览还是原图：只影响提示文案。
+    // 坐标空间仍然来自 snapshot.room.doc（原图尺寸），两者刻意不混在一起。
+    state.basePreview = base.variant === 'preview';
     const baseFile = new File([base.blob], base.name, { type: base.type });
     state.busyLoading = true;
     try {

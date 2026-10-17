@@ -8,9 +8,13 @@ const zoomLabel = computed(() =>
   editor.view.autoFit ? '适应' : Math.round(editor.view.zoom * 100) + '%',
 );
 const activeRecord = computed(() => editor.skins.find((s) => s.id === editor.activeSkinId) ?? null);
-const baseLabel = computed(() =>
-  editor.baseImage ? editor.baseImage.width + ' × ' + editor.baseImage.height : '未设置',
-);
+const baseLabel = computed(() => {
+  if (!editor.baseImage) return '未设置';
+  const size = editor.baseImage.width + ' × ' + editor.baseImage.height;
+  // 尺寸永远是原图尺寸（= 画布坐标空间）；预览只影响清晰度，
+  // 但用户有权知道自己看到的不是原始像素 —— 导出/换图仍以管理员为准。
+  return collab.basePreview ? size + ' · 预览' : size;
+});
 /**
  * 这句是隐私声明，不是装饰：离线时图片确实一步都没出浏览器，
  * 但进了房间，底图与每一张皮肤都已经存在服务器上了。房间模式下继续挂

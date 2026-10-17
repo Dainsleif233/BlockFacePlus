@@ -52,6 +52,33 @@ def draft(layer_id: str, **overrides: Any) -> dict[str, Any]:
     return record
 
 
+def png_bytes(width: int, height: int, color: tuple[int, int, int] = (200, 30, 60)) -> bytes:
+    """真正能被 Pillow 解码的 PNG。
+
+    上面那个 1x1 常量只够验魔数：Pillow 读它会报 broken data stream
+    （浏览器宽容，图像库不宽容），用它测预览永远测不到"生成成功"那条路。
+    """
+    from io import BytesIO
+
+    from PIL import Image
+
+    buffer = BytesIO()
+    Image.new("RGB", (width, height), color).save(buffer, "PNG")
+    return buffer.getvalue()
+
+
+def gif_bytes(width: int, height: int, frames: int = 2) -> bytes:
+    """多帧 GIF：用来验证"动图不生成静态预览"这条约束"""
+    from io import BytesIO
+
+    from PIL import Image
+
+    images = [Image.new("RGB", (width, height), (i * 40 % 255, 30, 60)) for i in range(frames)]
+    buffer = BytesIO()
+    images[0].save(buffer, "GIF", save_all=True, append_images=images[1:], duration=100)
+    return buffer.getvalue()
+
+
 def room_body(
     layers: list[dict[str, Any]] | None = None,
     expires_days: int = 7,

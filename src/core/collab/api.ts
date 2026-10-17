@@ -125,8 +125,17 @@ export const collabApi = {
     return (await response.json()) as { ok: true; doc: RoomDoc; baseImage: RoomBaseImage };
   },
 
-  /** 拉底图字节；调用方负责转成可用的图片对象 */
-  async fetchBase(roomId: string, password: string): Promise<{ blob: Blob; name: string; type: string }> {
+  /**
+   * 拉底图字节；调用方负责转成可用的图片对象。
+   *
+   * 拿到的可能是**预览图**（除管理员外服务器都只发预览），所以调用方必须记住：
+   * 这份 blob 只当像素源用，画布尺寸一律以快照里的 doc 为准，绝不能拿图片的
+   * naturalWidth/naturalHeight 去当坐标空间。
+   */
+  async fetchBase(
+    roomId: string,
+    password: string,
+  ): Promise<{ blob: Blob; name: string; type: string; variant: 'preview' | 'full' }> {
     const response = await fetch(`${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/base`, {
       headers: { [PASSWORD_HEADER]: password },
     });
@@ -141,6 +150,8 @@ export const collabApi = {
       blob: await response.blob(),
       name,
       type: response.headers.get('Content-Type') ?? 'image/png',
+      // 没有这个头就按原图算：宁可多给用户一次"这是原图"的错觉，也不能谎称是预览
+      variant: response.headers.get('X-BF-Base-Variant') === 'preview' ? 'preview' : 'full',
     };
   },
 };

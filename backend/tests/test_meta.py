@@ -13,6 +13,7 @@ DEFAULT_CONFIG = {
     "expiryDays": [3, 7, 14],
     "maxLayers": 512,
     "maxBaseImageBytes": 52428800,
+    "basePreviewMaxEdge": 2048,
     "maxSkinDataUrlChars": 5000000,
     "maxJsonBodyBytes": 67108864,
     "maxDocSize": 16384,

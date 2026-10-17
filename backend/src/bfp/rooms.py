@@ -122,8 +122,16 @@ def public_room(meta: aiosqlite.Row, base: aiosqlite.Row | None) -> dict[str, An
             {
                 "name": base["name"],
                 "type": base["type"],
+                # width/height 永远描述**原图**：它就是画布坐标空间，
+                # 预览图只是按同一比例缩小的像素源，绝不参与坐标换算。
                 "width": base["width"],
                 "height": base["height"],
+                # 有没有预览、预览多大（NULL = 没有，非管理员也只能拿原图）
+                "preview": (
+                    {"width": base["preview_width"], "height": base["preview_height"]}
+                    if base["preview_ext"] and base["preview_width"]
+                    else None
+                ),
             }
             if ready
             else None
