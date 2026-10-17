@@ -12,7 +12,7 @@
   ├───────────────────────────────────▶│
   │  ② fetch https://api.example.com/api/...
   ▼
-反向代理：nginx 或 Caddy（TLS + 请求体上限 ≥ 256MiB + 透传 X-BF-Room-Pwd）
+反向代理：nginx 或 Caddy（TLS + 请求体上限 ≥ 68MiB + 透传 X-BF-Room-Pwd）
   │  转发到 http://127.0.0.1:8088（nginx 的 proxy_pass / Caddy 的 reverse_proxy）
   ▼
 uvicorn（FastAPI 应用，单进程）
@@ -23,7 +23,7 @@ uvicorn（FastAPI 应用，单进程）
   └─ base/           底图字节（一间房一个文件：{房间号}.{后缀}）
 ```
 
-**为什么这么拆**：底图与皮肤都是用户素材，单条最大可以到 128MiB（底图）与 32M 字符（内嵌皮肤），
+**为什么这么拆**：底图与皮肤都是用户素材，单条最大可以到 50MiB（底图）与 5M 字符（内嵌皮肤），
 这种体量走云函数会一路撞平台硬限；放到自己的 VPS 上，限制只剩「磁盘」和「你愿意在反向代理上放开多大请求体」。
 静态产物留在边缘 Pages 则是因为它本来就该在那儿 —— 一个 CDN 就能解决的问题不必占用后端带宽。
 
@@ -34,7 +34,7 @@ uvicorn（FastAPI 应用，单进程）
 - 一台 Debian 12 / Ubuntu 22.04+ 的 VPS（其它发行版同理，包管理命令自己换）
 - 一个指向它的域名，例：`api.example.com`
 - root 或 sudo
-- 磁盘：日常十人用量是几十 MB 量级；单张底图上限 128MiB、单条头像上限 32M 字符，所以按「你会传多大的图」估，给 `/var/lib` 留 10～20GB 很宽裕。
+- 磁盘：日常十人用量是几十 MB 量级；单张底图上限 50MiB、单条头像上限 5M 字符，所以按「你会传多大的图」估，给 `/var/lib` 留 10～20GB 很宽裕。
 
 ---
 
@@ -138,17 +138,16 @@ sudo systemctl restart blockface-plus-api
 | ★ `BF_DATA_DIR` | `./data` | SQLite 与底图的根目录。生产固定 `/var/lib/blockface-plus`，必须与 unit 里的 `StateDirectory=blockface-plus` 一致（systemd 就是按这个名字建目录并授权的）。放在代码目录里，迟早会被某次 `git clean` 或重新部署顺手带走。 |
 | ★ `BF_CORS_ORIGINS` | `*` | 逗号分隔的浏览器来源白名单，**只写 scheme+host+port，不带路径、不带结尾斜杠**。同一个 Pages 站点有多个域名（自定义域 + 平台域）就都写上。默认 `*` 只适合本机联调。 |
 | `BF_TRUSTED_HOSTS` | `*` | 允许的 Host 头，逗号分隔。走反向代理（nginx / Caddy）时可以收成后端域名；守着 IP 直连 uvicorn 的场景才需要它。 |
-| `BF_MAX_LAYERS` | `10000` | 一间房最多多少行头像（旧版本 512）。这个值决定一次进房要读多少行，影响的是**进房速度**而不是容量。 |
-| `BF_MAX_SKIN_DATA_URL_CHARS` | `32000000` | 单条内嵌皮肤的 data URI 字符数。皮肤是内嵌在行里的，加大它等于加大数据库（与每次进房的响应体）。 |
-| `BF_MAX_BASE_IMAGE_BYTES` | `134217728`（128MiB） | 底图字节上限。**改大必须同步改反代的请求体上限**（nginx `client_max_body_size` / Caddy `request_body max_size`）。 |
-| `BF_MAX_JSON_BODY_BYTES` | `268435456`（256MiB） | JSON 请求体上限（旧云函数版本受平台硬限只有 6MiB）。批量首刷几千行头像时它才是天花板；**同样受反代请求体上限约束**。 |
-| `BF_MAX_DOC_SIZE` | `65536` | 画布边长上限。 |
-| `BF_MAX_POSITION` | `10000000` | 图层坐标绝对值上限。 |
-| `BF_MIN_LAYER_SIZE` / `BF_MAX_LAYER_SIZE` | `1` / `262144` | 图层尺寸区间。 |
-| `BF_MAX_AVATAR_NAME` | `512` | 头像名长度上限（名字每次进房都会回给所有人，留上限是防灌字节）。 |
-| `BF_MAX_EXPIRY_DAYS` | `3650` | 建房时可选的最长过期天数（前端 UI 只给 3/7/14/30/90）。 |
-| `BF_AUTH_WINDOW_SECONDS` | `60` | 密码试错限流窗口。 |
-| `BF_AUTH_MAX_FAILS` | `20` | 窗口内允许的失败次数，超了回 429。按**房间**计数，不是按 IP。 |
+| `BF_MAX_LAYERS` | `512` | 一间房最多多少行头像（与旧云函数版本一致）。这个值决定一次进房要读多少行，影响的是**进房速度**而不是容量。 |
+| `BF_MAX_SKIN_DATA_URL_CHARS` | `5000000` | 单条内嵌皮肤的 data URI 字符数（旧版本 1500000）。皮肤是内嵌在行里的，加大它等于加大数据库（与每次进房的响应体）。 |
+| `BF_MAX_BASE_IMAGE_BYTES` | `52428800`（50MiB） | 底图字节上限（旧版本 10MiB）。**改大必须同步改反代的请求体上限**（nginx `client_max_body_size` / Caddy `request_body max_size`）。 |
+| `BF_MAX_JSON_BODY_BYTES` | `67108864`（64MiB） | JSON 请求体上限（旧云函数版本受平台硬限只有 6MiB）。它是两个上限里较大的那个，反代的请求体上限要 ≥ 它；超限时反代若先拦会回纯文本 413，后端拦才是 `{"error": "请求体太大"}`。 |
+| `BF_MAX_DOC_SIZE` | `16384` | 画布边长上限（旧版本 8192）。 |
+| `BF_MAX_POSITION` | `100000` | 图层坐标绝对值上限（旧版本 32768）。 |
+| `BF_MIN_LAYER_SIZE` / `BF_MAX_LAYER_SIZE` | `16` / `16384` | 图层尺寸区间；上界跟画布边长一致（图层不该比画布还大）。 |
+| `BF_MAX_AVATAR_NAME` | `200` | 头像名长度上限（与旧版本一致；名字每次进房都会回给所有人，留上限是防灌字节）。 |
+| `BF_AUTH_WINDOW_SECONDS` | `60` | 密码试错限流窗口（与旧版本一致）。 |
+| `BF_AUTH_MAX_FAILS` | `10` | 窗口内允许的失败次数，超了回 429。按**房间**计数，不是按 IP。调大等于给暴力猜密码让路；调小则更容易被知道房间号的人拿来把房主挡在门外。 |
 | `BF_DRAFT_TTL_SECONDS` | `86400` | 建了房但一直没传底图的草稿房，多久算废弃。 |
 | `BF_SWEEP_INTERVAL_SECONDS` | `1800` | 后台清扫间隔，设 `0` 完全关掉。 |
 | `BF_HOST` / `BF_PORT` | `127.0.0.1` / `8088` | 只在不用 systemd、直接 `python -m bfp` 自启时生效；unit 里把 `--host/--port` 写在 `ExecStart` 上，所以这里改了不影响 systemd。 |
@@ -238,14 +237,15 @@ sudo nginx -t && sudo systemctl reload nginx
 
 ### 5.1 这份配置在做什么，为什么
 
-1. **`client_max_body_size 256m`** —— 与 `BF_MAX_JSON_BODY_BYTES` 默认值 268435456 字节**恰好相等**
-   （nginx 的 `256m` = 256×1024×1024 = 268435456），也与 128MiB 的 `BF_MAX_BASE_IMAGE_BYTES` 兼容。
+1. **`client_max_body_size 68m`** —— 比后端两个上限都要宽：JSON 请求体（`BF_MAX_JSON_BODY_BYTES` 默认 67108864 = 64MiB）
+   与底图（`BF_MAX_BASE_IMAGE_BYTES` 默认 52428800 = 50MiB，再加 multipart 的表单开销）。
+   反代比后端宽是**有意**的：这样超限时回话的是后端那句中文 413，而不是 nginx 的纯文本 413。
    这是最容易漏的一步：nginx 不放开，请求**根本到不了**后端，客户端收到的是 nginx 的纯文本 413，
    而不是后端那份 `{"error": "..."}`。**看报错长什么样，就知道是谁拦的。**
    改这两个上限时记得给 multipart 留余量：底图那次 POST 的整体体积是「图片字节 + 表单字段 + boundary」，
    后端自己留了 1MiB 的余量，nginx 这边也应当比 `BF_MAX_BASE_IMAGE_BYTES` 略大一点。
-2. **`proxy_request_buffering off`** —— 默认行为是 nginx 先把整个请求体收完再连上游：传一张 128MiB 底图，
-   就等于先在 nginx 的临时目录里落一份 128MiB 的文件。关掉之后字节边到边转发给 uvicorn，
+2. **`proxy_request_buffering off`** —— 默认行为是 nginx 先把整个请求体收完再连上游：传一张 50MiB 底图，
+   就等于先在 nginx 的临时目录里落一份 50MiB 的文件。关掉之后字节边到边转发给 uvicorn，
    省一次磁盘往返，也顺手消灭「`/var/lib/nginx` 被塞满」这类故障。
 3. **透传 `X-BF-Room-Pwd`** —— 后端只认请求头里的密码（绝不接受 query 里的），注释里也写了为什么值得显式写一行。
    `log_format` 里**不要**加这个头：那等于把房间密码抄进磁盘。
@@ -329,8 +329,8 @@ sudo systemctl reload caddy
 
 三处默认行为与 nginx 相反，样例文件里每条都写了理由，这里只列结论：
 
-1. **请求体默认没有上限。** nginx 要显式 `client_max_body_size 256m` 去放宽，Caddy 反过来 ——
-   它默认不限，样例里那句 `request_body { max_size 536870912 }` 是**主动收紧**，不是放开。
+1. **请求体默认没有上限。** nginx 要显式 `client_max_body_size 68m` 去放宽，Caddy 反过来 ——
+   它默认不限，样例里那句 `request_body { max_size 71303168 }` 是**主动收紧**，不是放开。
    它同样必须 ≥ `BF_MAX_JSON_BODY_BYTES`；比后端小的话，413 就来自 Caddy 而不是后端。
 2. **请求体默认不缓冲。** 对应 nginx 的 `proxy_request_buffering off`，Caddy 不需要配。
 3. **访问日志默认会把请求头整份记下来**（nginx 默认不记），而密码就在 `X-BF-Room-Pwd` 里。

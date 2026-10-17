@@ -46,8 +46,8 @@
 ```
 
 - 房间初始状态是 `draft`；底图由 2.5 上传后才变 `ready`。
-- `expiresDays` 取值 `1..BF_MAX_EXPIRY_DAYS`（默认 3650），前端 UI 提供 `3/7/14/30/90`。
-- 请求体大小上限 `BF_MAX_JSON_BODY_BYTES`（默认 256MiB），超限 413。
+- `expiresDays` 只能是 `3` / `7` / `14` 三者之一：这是**白名单**，不是区间（旧云函数同样是 `has()` 判断）。它与前端 UI 的三个按钮、`/api/config` 的 `expiryDays` 是同一份值，写死在 `config.EXPIRY_DAYS`，因为能单独配的话迟早会和 UI 对不上。其它值（含 30、90、3.5）一律 `400`，响应体是 `{"error": "过期天数只能是 3 / 7 / 14 天"}`。
+- 请求体大小上限 `BF_MAX_JSON_BODY_BYTES`（默认 64MiB），超限 413。
 
 ### 2.2 `GET /api/rooms/{roomId}` — 进房快照
 
@@ -140,17 +140,16 @@
 ```jsonc
 {
   "version": "0.2.0",
-  "expiryDays": [3, 7, 14, 30, 90],
-  "maxExpiryDays": 3650,
-  "maxLayers": 10000,
-  "maxBaseImageBytes": 134217728,
-  "maxSkinDataUrlChars": 32000000,
-  "maxJsonBodyBytes": 268435456,
-  "maxDocSize": 65536,
-  "minLayerSize": 1,
-  "maxLayerSize": 262144,
-  "maxAvatarName": 512,
-  "maxPosition": 10000000
+  "expiryDays": [3, 7, 14],
+  "maxLayers": 512,
+  "maxBaseImageBytes": 52428800,
+  "maxSkinDataUrlChars": 5000000,
+  "maxJsonBodyBytes": 67108864,
+  "maxDocSize": 16384,
+  "minLayerSize": 16,
+  "maxLayerSize": 16384,
+  "maxAvatarName": 200,
+  "maxPosition": 100000
 }
 ```
 
@@ -174,21 +173,20 @@
 ### LayoutPatch
 可选键：`name, x, y, size, rotation, opacity, overlay, flipH, visible, order`。没带的键服务端一律不动。
 
-## 4. 上限（放宽后的默认值，全部可用环境变量覆盖）
+## 4. 上限（默认值，除过期档位外都可用环境变量覆盖）
 
 | 环境变量 | 默认值 | 旧 EdgeOne 版本 | 说明 |
 | :-- | --: | --: | :-- |
-| `BF_MAX_LAYERS` | 10000 | 512 | 一间房最多多少行头像 |
-| `BF_MAX_SKIN_DATA_URL_CHARS` | 32000000 | 1500000 | 单条内嵌皮肤 data URI 字符数 |
-| `BF_MAX_BASE_IMAGE_BYTES` | 134217728 (128MiB) | 10485760 | 底图字节上限 |
-| `BF_MAX_DOC_SIZE` | 65536 | 8192 | 画布边长上限 |
-| `BF_MAX_POSITION` | 10000000 | 32768 | 图层坐标绝对值上限 |
-| `BF_MIN_LAYER_SIZE` / `BF_MAX_LAYER_SIZE` | 1 / 262144 | 16 / 4096 | 图层尺寸区间 |
-| `BF_MAX_AVATAR_NAME` | 512 | 200 | 头像名长度 |
-| `BF_MAX_JSON_BODY_BYTES` | 268435456 (256MiB) | 6MiB（平台硬限） | JSON 请求体上限 |
-| `BF_MAX_EXPIRY_DAYS` | 3650 | 14 | 过期天数上限 |
+| `BF_MAX_LAYERS` | 512 | 512 | 一间房最多多少行头像 |
+| `BF_MAX_SKIN_DATA_URL_CHARS` | 5000000 | 1500000 | 单条内嵌皮肤 data URI 字符数 |
+| `BF_MAX_BASE_IMAGE_BYTES` | 52428800 (50MiB) | 10485760 | 底图字节上限 |
+| `BF_MAX_DOC_SIZE` | 16384 | 8192 | 画布边长上限 |
+| `BF_MAX_POSITION` | 100000 | 32768 | 图层坐标绝对值上限 |
+| `BF_MIN_LAYER_SIZE` / `BF_MAX_LAYER_SIZE` | 16 / 16384 | 16 / 4096 | 图层尺寸区间（上界 = 画布边长） |
+| `BF_MAX_AVATAR_NAME` | 200 | 200 | 头像名长度 |
+| `BF_MAX_JSON_BODY_BYTES` | 67108864 (64MiB) | 6MiB（平台硬限） | JSON 请求体上限 |
 | `BF_AUTH_WINDOW_SECONDS` | 60 | 60 | 失败限流窗口 |
-| `BF_AUTH_MAX_FAILS` | 20 | 10 | 窗口内允许的失败次数 |
+| `BF_AUTH_MAX_FAILS` | 10 | 10 | 窗口内允许的失败次数 |
 | `BF_DRAFT_TTL_SECONDS` | 86400 | — | 建房后没传底图的草稿房多久清理 |
 | `BF_SWEEP_INTERVAL_SECONDS` | 1800 | — | 后台清扫间隔（0 = 关闭） |
 
