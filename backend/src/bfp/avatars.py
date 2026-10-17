@@ -158,18 +158,24 @@ async def patch_avatars(request: Request, room_id: str) -> JSONResponse:
     adds = _dedupe([item for item in raw_adds if is_record(item)])
     deletes = list(dict.fromkeys(item for item in raw_deletes if isinstance(item, str)))
 
-    # 一次请求能提到的行数不会超过"房间最多几行"：超过就是有人在灌请求，不是正常用法
-    for label, items in (("修改", updates), ("新增", adds), ("删除", deletes)):
-        if len(items) > settings.max_layers:
-            raise ApiError(400, f"一次提交的{label}条数超过一间房的上限（{settings.max_layers}）")
-
     if not updates and not adds and not deletes:
         return json_response({"results": []})
 
-    now = now_ms()
     results: list[dict[str, Any]] = []
 
     async with db.transaction() as conn:
+        # 版本戳必须严格递增；毫秒时钟在连续请求中可能不前进，导致旧凭证被误放行。
+        cursor = await conn.execute(
+            "SELECT MAX(CASE WHEN skin_updated_at > layout_updated_at THEN skin_updated_at ELSE layout_updated_at END) AS latest "
+            "FROM avatars WHERE room_id = ?",
+            (meta["room_id"],),
+        )
+        try:
+            latest_row = await cursor.fetchone()
+        finally:
+            await cursor.close()
+        latest = int(latest_row["latest"]) if latest_row and latest_row["latest"] is not None else 0
+        now = max(now_ms(), latest + 1)
         # 行数上限是「一间房」的，不是「一次请求」的。只按单次请求判等于没有上限：
         # 分四十次 adds 就能把一间房堆到 512 行以上，而 GET /api/rooms/{id} 是一次性
         # 全量返回的 —— 房间越界之后，任何一次进房都要把整间房读进内存。

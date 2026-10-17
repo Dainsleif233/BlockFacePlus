@@ -265,12 +265,25 @@ async def test_same_id_twice_in_one_request_last_wins(harness):
     assert (await snapshot(harness, room_id, admin))["avatars"][0]["x"] == 2
 
 
-async def test_per_request_item_limit(open_harness, tmp_path):
-    async with open_harness(tmp_path, BF_MAX_LAYERS="2") as harness:
+async def test_delete_batch_is_not_limited_by_room_capacity(harness):
+    room_id, _edit, admin = await harness.create_ok(layers=[draft("l1")])
+    # 单次条数不是容量限制；删除不存在的 id 仍是幂等成功。
+    response = await patch(harness, room_id, admin, {"deletes": [f"ghost-{i}" for i in range(513)]})
+    assert response.status_code == 200, response.text
+    assert len(response.json()["results"]) == 513
+
+
+async def test_version_stamps_advance_when_clock_does_not(open_harness, tmp_path, monkeypatch):
+    import bfp.avatars as avatars_module
+
+    async with open_harness(tmp_path) as harness:
         room_id, _edit, admin = await harness.create_ok(layers=[draft("l1")])
-        too_many = await patch(harness, room_id, admin, {"deletes": ["a1", "a2", "a3"]})
-        assert too_many.status_code == 400
-        assert "一次提交的删除条数" in too_many.json()["error"]
+        monkeypatch.setattr(avatars_module, "now_ms", lambda: 1_000)
+        before = (await snapshot(harness, room_id, admin))["avatars"][0]
+        first = await patch(harness, room_id, admin, {"updates": [{"id": "l1", "layout": {"x": 1}}]})
+        second = await patch(harness, room_id, admin, {"updates": [{"id": "l1", "layout": {"x": 2}}]})
+        assert first.json()["results"][0]["layoutUpdatedAt"] > before["layoutUpdatedAt"]
+        assert second.json()["results"][0]["layoutUpdatedAt"] > first.json()["results"][0]["layoutUpdatedAt"]
 
 
 async def test_adds_are_normalized_like_create(harness):

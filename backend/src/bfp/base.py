@@ -41,7 +41,14 @@ from .normalize import (
 )
 from .rooms import get_db, get_settings, require_room
 from .security import authenticate, now_ms
-from .storage import StagedBaseImage, base_image_path
+from .storage import (
+    StagedBaseImage,
+    backup_base_files,
+    base_image_path,
+    cleanup_base_backups,
+    orphan_base_files,
+    rollback_base_files,
+)
 
 __all__ = ["router"]
 
@@ -150,7 +157,11 @@ async def upload_base(request: Request, room_id: str) -> JSONResponse:
         raise ApiError(400, "底图尺寸不合法")
 
     staged = StagedBaseImage(settings, meta["room_id"])
+    backups: list[tuple] = []
+    committed = False
     try:
+        # 旧文件先做同文件系统硬链接备份；数据库失败时可以恢复，不必把底图读进内存。
+        backups = await asyncio.to_thread(backup_base_files, settings, meta["room_id"])
         # 边读边计数：超过上限立刻 413，剩下的字节不读了，半截临时文件在 except 里清掉
         while True:
             chunk = await upload.read(CHUNK_SIZE)
@@ -168,21 +179,31 @@ async def upload_base(request: Request, room_id: str) -> JSONResponse:
         ext = ext_for_content_type(content_type)
         if ext is None:
             raise ApiError(400, "底图只支持 PNG / JPG / WebP / GIF")
-        # 原子替换到 base/{roomId}.{ext}，并清掉同一间房其它后缀的旧底图（不留孤儿文件）
-        await asyncio.to_thread(staged.commit, ext)
+        # 先替换文件但保留旧后缀，等元数据事务成功后再清理；失败则恢复备份。
+        await asyncio.to_thread(staged.commit, ext, cleanup=False)
+        committed = True
+        updated_at = now_ms()
+        async with db.transaction() as conn:
+            await conn.execute(
+                "UPDATE room_base SET ext = ?, type = ?, name = ?, width = ?, height = ?, status = 'ready', "
+                "updated_at = ? WHERE room_id = ?",
+                (ext, content_type, name, width, height, updated_at, meta["room_id"]),
+            )
     except BaseException:
         staged.abort()
+        await asyncio.to_thread(
+            rollback_base_files, settings, meta["room_id"], backups, committed=committed
+        )
         raise
     finally:
         await upload.close()
 
-    updated_at = now_ms()
-    async with db.transaction() as conn:
-        await conn.execute(
-            "UPDATE room_base SET ext = ?, type = ?, name = ?, width = ?, height = ?, status = 'ready', "
-            "updated_at = ? WHERE room_id = ?",
-            (ext, content_type, name, width, height, updated_at, meta["room_id"]),
-        )
+    await asyncio.to_thread(cleanup_base_backups, backups)
+    for stale in orphan_base_files(settings, meta["room_id"], ext):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
 
     return json_response(
         {

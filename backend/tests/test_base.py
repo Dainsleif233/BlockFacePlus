@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import pytest
 from urllib.parse import quote
 
 from conftest import (
@@ -301,6 +302,24 @@ async def test_multipart_spool_dir_lives_in_the_data_dir(open_harness, tmp_path)
             assert list((harness.data_dir / "tmp").iterdir()) == []
     finally:
         tempfile.tempdir = original
+
+
+async def test_failed_metadata_update_restores_previous_base(harness):
+    room_id, _edit, admin = await harness.create_ok()
+    assert (await harness.upload(room_id, admin, content=PNG_BYTES)).status_code == 200
+
+    async with harness.db.transaction() as conn:
+        await conn.execute(
+            "CREATE TRIGGER fail_room_base_update BEFORE UPDATE ON room_base "
+            "BEGIN SELECT RAISE(ABORT, 'forced metadata failure'); END;"
+        )
+
+    with pytest.raises(Exception, match="forced metadata failure"):
+        await harness.upload(room_id, admin, content=JPEG_BYTES)
+    assert harness.all_base_files() == [f"{room_id}.png"]
+    downloaded = await harness.client.get(f"/api/rooms/{room_id}/base", headers=pwd(admin))
+    assert downloaded.status_code == 200
+    assert downloaded.content == PNG_BYTES
 
 
 async def test_avatar_rows_survive_base_upload(harness):

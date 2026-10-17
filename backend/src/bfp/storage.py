@@ -19,7 +19,16 @@ from pathlib import Path
 
 from .config import Settings
 
-__all__ = ["StagedBaseImage", "base_image_path", "delete_room_files", "find_base_image", "orphan_base_files"]
+__all__ = [
+    "StagedBaseImage",
+    "base_image_path",
+    "backup_base_files",
+    "cleanup_base_backups",
+    "delete_room_files",
+    "find_base_image",
+    "orphan_base_files",
+    "rollback_base_files",
+]
 
 # 上传暂存文件名的前缀：以点开头，正常目录列表里看不见，也绝不会和房间号撞（房间号不含点）
 _TEMP_PREFIX = "."
@@ -40,6 +49,57 @@ def find_base_image(settings: Settings, room_id: str) -> Path | None:
         if candidate.is_file() and not candidate.name.startswith(_TEMP_PREFIX):
             return candidate
     return None
+
+
+def backup_base_files(settings: Settings, room_id: str) -> list[tuple[Path, Path]]:
+    """为现有底图创建同文件系统硬链接备份，避免失败回滚时复制 50MiB 到内存。"""
+    backups: list[tuple[Path, Path]] = []
+    for candidate in settings.base_dir.glob(f"{room_id}.*"):
+        if not candidate.is_file() or candidate.name.startswith(_TEMP_PREFIX):
+            continue
+        fd, name = tempfile.mkstemp(
+            dir=settings.base_dir,
+            prefix=f"{_TEMP_PREFIX}{room_id}.backup-",
+            suffix=_TEMP_SUFFIX,
+        )
+        os.close(fd)
+        backup = Path(name)
+        backup.unlink(missing_ok=True)
+        try:
+            os.link(candidate, backup)
+        except BaseException:
+            backup.unlink(missing_ok=True)
+            for _original, previous in backups:
+                previous.unlink(missing_ok=True)
+            raise
+        backups.append((candidate, backup))
+    return backups
+
+
+def cleanup_base_backups(backups: list[tuple[Path, Path]]) -> None:
+    for _original, backup in backups:
+        backup.unlink(missing_ok=True)
+
+
+def rollback_base_files(
+    settings: Settings,
+    room_id: str,
+    backups: list[tuple[Path, Path]],
+    *,
+    committed: bool,
+) -> None:
+    """恢复元数据事务失败前的文件视图；新文件和旧后缀都不会留下脏状态。"""
+    if not committed:
+        cleanup_base_backups(backups)
+        return
+    original_paths = {original for original, _backup in backups}
+    for candidate in settings.base_dir.glob(f"{room_id}.*"):
+        if candidate.name.startswith(_TEMP_PREFIX) or candidate not in original_paths:
+            if candidate.is_file():
+                candidate.unlink(missing_ok=True)
+    for original, backup in backups:
+        original.unlink(missing_ok=True)
+        os.replace(backup, original)
 
 
 def orphan_base_files(settings: Settings, room_id: str, keep_ext: str) -> list[Path]:
@@ -139,16 +199,17 @@ class StagedBaseImage:
         self.close()
         self.unlink()
 
-    def commit(self, ext: str) -> Path:
+    def commit(self, ext: str, *, cleanup: bool = True) -> Path:
         """落定到 {roomId}.{ext}。返回最终路径。"""
         self.close()
         final = base_image_path(self.settings, self.room_id, ext)
         # os.replace 在同一文件系统内是原子的：要么看到旧文件，要么看到完整的新文件
         os.replace(self._path, final)
-        for stale in orphan_base_files(self.settings, self.room_id, ext):
-            try:
-                stale.unlink()
-            except OSError:
-                pass
+        if cleanup:
+            for stale in orphan_base_files(self.settings, self.room_id, ext):
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
         return final
 
