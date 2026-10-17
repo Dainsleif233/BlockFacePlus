@@ -253,7 +253,7 @@ export async function reloadRoom(): Promise<void> {
  * 提交
  * ------------------------------------------------------------------ */
 
-/** 底图超出后端上限（BF_MAX_BASE_IMAGE_BYTES，128MB）时给出可直接照做的文案，null 表示没超 */
+/** 底图超出后端上限（BF_MAX_BASE_IMAGE_BYTES，50MB）时给出可直接照做的文案，null 表示没超 */
 function baseTooLarge(file: File): string | null {
   if (file.size <= MAX_BASE_IMAGE_BYTES) return null;
   return `底图 ${formatBytes(file.size)}，超过 ${MAX_BASE_IMAGE_BYTES / (1024 * 1024)}MB 上限，先压小再试`;

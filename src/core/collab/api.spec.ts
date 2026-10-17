@@ -146,10 +146,11 @@ describe('uploadBase', () => {
 });
 
 describe('体积上限', () => {
-  it('三个上限都跟着后端的 BF_* 默认值放宽', () => {
-    expect(MAX_PATCH_CHARS).toBe(64 * 1024 * 1024);
-    expect(MAX_CREATE_CHARS).toBe(256 * 1024 * 1024);
-    expect(MAX_BASE_IMAGE_BYTES).toBe(128 * 1024 * 1024);
+  it('三个上限与后端 BF_* 默认值对齐', () => {
+    // 这些数字要和 backend/src/bfp/config.py 的默认值、契约第 4 节那张表同时改
+    expect(MAX_PATCH_CHARS).toBe(32 * 1024 * 1024);
+    expect(MAX_CREATE_CHARS).toBe(64 * 1024 * 1024);
+    expect(MAX_BASE_IMAGE_BYTES).toBe(50 * 1024 * 1024);
   });
 
   it('单批差量上限比建房上限小，留出余量', () => {
@@ -188,7 +189,7 @@ describe('体积上限', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('建房请求体积超限同样在本地拦下（后端上限 256MiB 不会白跑一趟）', async () => {
+  it('建房请求体积超限同样在本地拦下（后端上限 64MiB 不会白跑一趟）', async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     const big = {

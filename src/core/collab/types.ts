@@ -70,7 +70,7 @@ export type RoomAvatarDraft = Omit<RoomAvatarRecord, 'skinUpdatedAt' | 'layoutUp
 export interface CreateRoomPayload {
   baseImage: { name: string; type: string; width: number; height: number };
   layers: RoomAvatarDraft[];
-  /** 过期天数：UI 给 3/7/14/30/90，服务端另有 BF_MAX_EXPIRY_DAYS 兜底 */
+  /** 过期天数：白名单 3/7/14，前后端是同一份（后端 config.EXPIRY_DAYS） */
   expiresDays: number;
 }
 
@@ -125,5 +125,5 @@ export interface PatchResult {
   results: PatchItemResult[];
 }
 
-export const EXPIRY_DAYS = [3, 7, 14, 30, 90] as const;
+export const EXPIRY_DAYS = [3, 7, 14] as const;
 export type ExpiryDays = (typeof EXPIRY_DAYS)[number];

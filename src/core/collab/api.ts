@@ -148,17 +148,17 @@ export const collabApi = {
 /**
  * 单次请求的体积上限。单位是 JSON.stringify 出来的**字符串长度**（UTF-16 码元），不是字节数 ——
  * 头像名里带中文时，实际发出的 UTF-8 字节会比这里数出来的多。所以这两层校验都只是「提前给个提示」，
- * 真正的边界始终是服务端的 BF_MAX_JSON_BODY_BYTES（默认 256MiB，见 docs/collab-api.md 第 4 节），
+ * 真正的边界始终是服务端的 BF_MAX_JSON_BODY_BYTES（默认 64MiB，见 docs/collab-api.md 第 4 节），
  * 服务端那份 413 的 {"error": ...} 会被 UI 原样显示出来。
  *
- * PATCH 取 64MiB 是有意比服务端上限（256MiB）保守：它决定的是分块粒度，不是能力上限。
+ * PATCH 取 32MiB 是有意比服务端上限（64MiB）保守：它决定的是分块粒度，不是能力上限。
  * 这是**传输**边界，不是"一次能改多少个头像"的限制：
  * 改得再多也只是自动切成几个请求，一条都不会丢。
  */
-export const MAX_PATCH_CHARS = 64 * 1024 * 1024;
+export const MAX_PATCH_CHARS = 32 * 1024 * 1024;
 
 /** 建房是真正的一次性全量（一间全新的房）：与后端 BF_MAX_JSON_BODY_BYTES 的默认值取齐，单位同上一段 */
-export const MAX_CREATE_CHARS = 256 * 1024 * 1024;
+export const MAX_CREATE_CHARS = 64 * 1024 * 1024;
 
 function oversizeMessage(chars: number, limit: number): string {
   return `这次要传的内容约 ${formatBytes(chars)}，超过单次请求的 ${formatBytes(limit)} 上限：把自定义图压小一点再试`;
@@ -179,13 +179,13 @@ export function fullSubmitTooLarge(payload: unknown, limit = MAX_CREATE_CHARS): 
 }
 
 /**
- * 底图体积上限：与后端 BF_MAX_BASE_IMAGE_BYTES（128MiB）取齐。
+ * 底图体积上限：与后端 BF_MAX_BASE_IMAGE_BYTES（50MiB）取齐。
  * 上传前先拦下来，否则几 MB 的底图要等整段上传完才由服务端回一句 413，
  * 大图上白白浪费一次完整的往返。
  */
-export const MAX_BASE_IMAGE_BYTES = 128 * 1024 * 1024;
+export const MAX_BASE_IMAGE_BYTES = 50 * 1024 * 1024;
 
-/** 把字节数说成人话，用于「底图 28.4MB，超过 128MB 上限」这类提示 */
+/** 把字节数说成人话，用于「底图 28.4MB，超过 50MB 上限」这类提示 */
 export function formatBytes(bytes: number): string {
   if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
   if (bytes >= 1024) return `${Math.round(bytes / 1024)}KB`;

@@ -1269,7 +1269,7 @@ export async function loadRoomDocument(
   }
 }
 
-/** 皮肤位图 → PNG data URI 与实际尺寸；MC皮肤仅存正脸双层（底层与帽子层并排，16×8 等比），通用头像等比限制在 512px 内以防超出 1.5MB 限制；画布被污染时返回 null */
+/** 皮肤位图 → PNG data URI 与实际尺寸；MC皮肤仅存正脸双层（底层与帽子层并排，16×8 等比），通用头像等比压到 512px 以内（远小于单条 data URI 的上限 BF_MAX_SKIN_DATA_URL_CHARS，钱花在清晰度上不划算）；画布被污染时返回 null */
 function skinToDataUrl(skin: SkinTexture): { dataUrl: string; width: number; height: number; frontOnly?: boolean } | null {
   try {
     const isCustom = skin.meta.isCustomImage === true;
