@@ -141,6 +141,14 @@
 - `X-BF-Base-Variant: full | preview` —— 告诉前端这一份是原图还是预览
 - `X-Content-Type-Options: nosniff`
 - `Cache-Control: private, max-age=60`
+- `ETag: "<变体>-<mtime>-<size>"`（强校验器，**含变体**：同一 URL 对不同角色发不同字节，
+  共用 ETag 会让"编辑者的预览"与"管理员要的原图"被当成同一份东西复用）
+- `Vary: X-BF-Room-Pwd`（CORS 中间件还会再追加 `Origin`）
+
+**条件请求**：带 `If-None-Match` 且与当前 ETag 匹配时返回 `304`，**不带宽体**。
+弱比较（`W/"..."` 与 `*` 都认）。这是小带宽机器上最便宜的优化：
+缓存过期后浏览器必须回来问一句，答 200 是整张图重下一遍，答 304 只有几百字节头。
+换底图后文件 mtime/大小变化 → ETag 变 → 自动回 200。
 
 **按角色分发**：
 

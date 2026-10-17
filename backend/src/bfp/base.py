@@ -16,9 +16,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator
+from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 
 # 注意：isinstance 判断必须用 starlette 的 UploadFile。fastapi.UploadFile 是它的**子类**，
@@ -108,6 +109,53 @@ def _drop_previews(settings: Settings, room_id: str) -> None:
             pass
 
 
+def _base_etag(path: Path, variant: str) -> str:
+    """强校验器：文件 mtime + 大小 + **变体**。
+
+    变体必须进 ETag：同一个 URL 对不同角色发不同字节，共用 ETag 会让
+    "编辑者的预览"与"管理员要的原图"被当成同一份东西复用。
+    """
+    stat = path.stat()
+    return f'"{variant}-{stat.st_mtime_ns:x}-{stat.st_size:x}"'
+
+
+def _matches_etag(if_none_match: str | None, etag: str) -> bool:
+    """If-None-Match 走弱比较（RFC 9110 §13.1.2）：忽略 W/ 前缀，逗号分隔逐项比"""
+    if not if_none_match:
+        return False
+    target = etag.strip()
+    for candidate in if_none_match.split(","):
+        candidate = candidate.strip()
+        if not candidate:
+            continue
+        if candidate == "*":
+            return True
+        if candidate.removeprefix("W/").strip() == target:
+            return True
+    return False
+
+
+def _serve_base(
+    request: Request, path: Path, media_type: str, name: str, variant: str
+) -> Response:
+    """原图与预览共用的出口：带 ETag，命中 If-None-Match 就回 304。
+
+    304 的价值在小带宽机器上很直接：浏览器缓存过期后必须回来问一句，
+    答 200 就是整张图重下一遍（50MiB 的图能重下几十秒），答 304 只有几百字节头。
+    """
+    headers = _base_headers(name, variant)
+    etag = _base_etag(path, variant)
+    headers["ETag"] = etag
+    # 响应体取决于密码（编辑者拿预览、管理员拿原图），按 HTTP 语义必须声明 Vary。
+    # 共享缓存本来就被 Cache-Control: private 挡住，这里只是让私有缓存别串角色。
+    headers["Vary"] = "X-BF-Room-Pwd"
+    if _matches_etag(request.headers.get("if-none-match"), etag):
+        # 304 不带正文，也不回 Content-Type/Content-Length
+        keep = ("ETag", "Cache-Control", "Vary", "X-BF-Base-Variant")
+        return Response(status_code=304, headers={key: headers[key] for key in keep if key in headers})
+    return FileResponse(path, media_type=media_type, headers=headers)
+
+
 def _base_headers(name: str, variant: str) -> dict[str, str]:
     return {
         # 响应头不允许非 ASCII：文件名 percent-encoding，前端 decodeURIComponent 解回来
@@ -146,21 +194,13 @@ async def get_base(request: Request, room_id: str) -> FileResponse:
         if preview_ext:
             preview_path = preview_image_path(settings, meta["room_id"], preview_ext)
             if preview_path.is_file():
-                return FileResponse(
-                    preview_path,
-                    media_type=base_row["preview_type"],
-                    headers=_base_headers(base_row["name"], "preview"),
-                )
+                return _serve_base(request, preview_path, base_row["preview_type"], base_row["name"], "preview")
 
     path = base_image_path(settings, meta["room_id"], base_row["ext"])
     if not path.is_file():
         raise ApiError(404, "底图文件丢失")
 
-    return FileResponse(
-        path,
-        media_type=base_row["type"],
-        headers=_base_headers(base_row["name"], "full"),
-    )
+    return _serve_base(request, path, base_row["type"], base_row["name"], "full")
 
 
 @router.post("/{room_id}/base")

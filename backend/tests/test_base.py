@@ -539,3 +539,89 @@ async def test_delete_room_also_removes_preview_files(open_harness, tmp_path):
 
         assert (await harness.client.delete(f"/api/rooms/{room_id}", headers=pwd(admin))).status_code == 200
         assert list(preview_dir.iterdir()) == []
+
+# --------------------------------------------------------------------------- #
+# 条件请求（304）：带宽小的时候，回源"再下一遍整张图"是最贵的浪费
+# --------------------------------------------------------------------------- #
+
+
+async def test_base_download_answers_304_when_the_etag_matches(open_harness, tmp_path):
+    async with open_harness(tmp_path, BF_BASE_PREVIEW_MAX_EDGE="256") as harness:
+        room_id, edit, admin = await harness.create_ok()
+        assert (await harness.upload(room_id, admin, content=png_bytes(512, 512), width=512, height=512)).status_code == 200
+
+        first = await harness.client.get(f"/api/rooms/{room_id}/base", headers=pwd(admin))
+        assert first.status_code == 200
+        etag = first.headers["etag"]
+        assert etag and etag.startswith('"')
+        # 响应体取决于密码，必须声明 Vary，否则私有缓存会把预览当原图复用。
+        # （CORS 中间件会再往 Vary 上追加 Origin，所以这里只查包含关系）
+        assert "X-BF-Room-Pwd" in first.headers["vary"]
+
+        second = await harness.client.get(
+            f"/api/rooms/{room_id}/base", headers={**pwd(admin), "If-None-Match": etag}
+        )
+        assert second.status_code == 304
+        # 304 不带正文：省下来的正是这几十 MB
+        assert second.content == b""
+        assert second.headers["etag"] == etag
+        assert second.headers["cache-control"] == "private, max-age=60"
+        assert second.headers["x-bf-base-variant"] == "full"
+
+
+async def test_304_accepts_weak_and_star_forms(open_harness, tmp_path):
+    async with open_harness(tmp_path, BF_BASE_PREVIEW_MAX_EDGE="256") as harness:
+        room_id, _edit, admin = await harness.create_ok()
+        assert (await harness.upload(room_id, admin, content=png_bytes(64, 64), width=64, height=64)).status_code == 200
+        etag = (await harness.client.get(f"/api/rooms/{room_id}/base", headers=pwd(admin))).headers["etag"]
+
+        # RFC 9110：If-None-Match 用弱比较，W/ 前缀不影响命中
+        weak = await harness.client.get(
+            f"/api/rooms/{room_id}/base", headers={**pwd(admin), "If-None-Match": f"W/{etag}"}
+        )
+        assert weak.status_code == 304
+
+        star = await harness.client.get(
+            f"/api/rooms/{room_id}/base", headers={**pwd(admin), "If-None-Match": "*"}
+        )
+        assert star.status_code == 304
+
+        # 不匹配就得老老实实发全量
+        stale = await harness.client.get(
+            f"/api/rooms/{room_id}/base", headers={**pwd(admin), "If-None-Match": '"deadbeef"'}
+        )
+        assert stale.status_code == 200
+        assert stale.content == png_bytes(64, 64)
+
+
+async def test_etag_is_variant_specific(open_harness, tmp_path):
+    """同一个 URL 对编辑者与管理员发不同字节：ETag 必须分开，否则会串角色"""
+    async with open_harness(tmp_path, BF_BASE_PREVIEW_MAX_EDGE="128") as harness:
+        room_id, edit, admin = await harness.create_ok()
+        assert (await harness.upload(room_id, admin, content=png_bytes(512, 512), width=512, height=512)).status_code == 200
+
+        full = await harness.client.get(f"/api/rooms/{room_id}/base", headers=pwd(admin))
+        preview = await harness.client.get(f"/api/rooms/{room_id}/base", headers=pwd(edit))
+        assert full.headers["etag"] != preview.headers["etag"]
+
+        # 拿原图的 ETag 去问预览：不匹配，必须回 200 而不是 304
+        mixed = await harness.client.get(
+            f"/api/rooms/{room_id}/base", headers={**pwd(edit), "If-None-Match": full.headers["etag"]}
+        )
+        assert mixed.status_code == 200
+        assert mixed.headers["x-bf-base-variant"] == "preview"
+
+
+async def test_etag_changes_after_the_base_is_replaced(open_harness, tmp_path):
+    async with open_harness(tmp_path, BF_BASE_PREVIEW_MAX_EDGE="256") as harness:
+        room_id, _edit, admin = await harness.create_ok()
+        assert (await harness.upload(room_id, admin, content=png_bytes(64, 64), width=64, height=64)).status_code == 200
+        before = (await harness.client.get(f"/api/rooms/{room_id}/base", headers=pwd(admin))).headers["etag"]
+
+        assert (await harness.upload(room_id, admin, content=png_bytes(320, 200), width=320, height=200)).status_code == 200
+        after = await harness.client.get(
+            f"/api/rooms/{room_id}/base", headers={**pwd(admin), "If-None-Match": before}
+        )
+        assert after.status_code == 200
+        assert after.headers["etag"] != before
+        assert after.content == png_bytes(320, 200)
