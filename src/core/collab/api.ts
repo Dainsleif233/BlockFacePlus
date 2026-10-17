@@ -74,6 +74,22 @@ async function request<T>(
   return (await response.json()) as T;
 }
 
+/**
+ * 底图下载结果：要么"变了，这是新字节"，要么"没变，用你本地那份"。
+ * 判别字段是 notModified —— 只有真的发了 If-None-Match 才可能收到 304。
+ */
+export type BaseDownload =
+  | { notModified: true }
+  | {
+      notModified: false;
+      blob: Blob;
+      name: string;
+      type: string;
+      variant: 'preview' | 'full';
+      /** 服务端的强校验器；为空时不建议缓存（没法验证就永远不知道底图换没换） */
+      etag: string | null;
+    };
+
 export const collabApi = {
   createRoom(payload: CreateRoomPayload): Promise<CreateRoomResult> {
     return request('POST', '/api/rooms', { body: payload, maxChars: MAX_CREATE_CHARS });
@@ -131,14 +147,20 @@ export const collabApi = {
    * 拿到的可能是**预览图**（除管理员外服务器都只发预览），所以调用方必须记住：
    * 这份 blob 只当像素源用，画布尺寸一律以快照里的 doc 为准，绝不能拿图片的
    * naturalWidth/naturalHeight 去当坐标空间。
+   *
+   * 传 `etag` 就带上 `If-None-Match`：服务端认为没变会回 `304`（无正文），
+   * 此时返回 `{ notModified: true }`，调用方直接用本地那份字节。
+   * 这是小带宽机器上最划算的一次往返 —— 请求走完，图一个字节都不用传。
    */
   async fetchBase(
     roomId: string,
     password: string,
-  ): Promise<{ blob: Blob; name: string; type: string; variant: 'preview' | 'full' }> {
-    const response = await fetch(`${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/base`, {
-      headers: { [PASSWORD_HEADER]: password },
-    });
+    options: { etag?: string | null } = {},
+  ): Promise<BaseDownload> {
+    const headers: Record<string, string> = { [PASSWORD_HEADER]: password };
+    if (options.etag) headers['If-None-Match'] = options.etag;
+    const response = await fetch(`${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/base`, { headers });
+    if (response.status === 304) return { notModified: true };
     if (!response.ok) throw await parseError(response);
     // 文件名可能是中文：服务端用 percent-encoding 放进响应头（响应头不允许非 ASCII），这里解回来
     let name = '底图';
@@ -147,11 +169,14 @@ export const collabApi = {
       try { name = decodeURIComponent(rawName); } catch { name = rawName; }
     }
     return {
+      notModified: false,
       blob: await response.blob(),
       name,
       type: response.headers.get('Content-Type') ?? 'image/png',
       // 没有这个头就按原图算：宁可多给用户一次"这是原图"的错觉，也不能谎称是预览
       variant: response.headers.get('X-BF-Base-Variant') === 'preview' ? 'preview' : 'full',
+      // 下次带着它回来问，服务端答 304 就一个字节都不用传
+      etag: response.headers.get('ETag'),
     };
   },
 };

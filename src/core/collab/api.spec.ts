@@ -94,8 +94,20 @@ describe('API_BASE 前缀', () => {
 });
 
 describe('fetchBase', () => {
-  function binaryStub(headers: Record<string, string>) {
-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(new Blob(['png']), { status: 200, headers }))));
+  function binaryStub(headers: Record<string, string>, status = 200) {
+    // 形参必须写出来：vi.fn 会按签名推断 calls 的元组类型，
+    // 不写就变成 [] ，测试里取 init.headers 会直接报"没有下标 1"
+    const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
+      Promise.resolve(new Response(status === 304 ? null : new Blob(['png']), { status, headers })),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+
+  /** notModified 是判别字段：拿到字节的分支才有 name/type/variant */
+  function bytes(base: Awaited<ReturnType<typeof collabApi.fetchBase>>) {
+    if (base.notModified) throw new Error('本用例期望拿到字节，不是 304');
+    return base;
   }
 
   it('服务端标了 preview 就如实回报 —— 只影响提示文案，坐标空间仍由 doc 决定', async () => {
@@ -104,17 +116,45 @@ describe('fetchBase', () => {
       'Content-Type': 'image/webp',
       'X-BF-Base-Name': encodeURIComponent('我的底图.png'),
     });
-    const base = await collabApi.fetchBase('r1', 'pw');
+    const base = bytes(await collabApi.fetchBase('r1', 'pw'));
     expect(base.variant).toBe('preview');
     expect(base.type).toBe('image/webp');
     expect(base.name).toBe('我的底图.png');
   });
 
-  it('没有变体头就按原图算：宁可少说一句预览，也不能谎称是预览', async () => {
+  // 没变体头时按原图算：宁可少说一句预览，也不能谎称是预览
+  it('没有变体头就按原图算', async () => {
     binaryStub({ 'Content-Type': 'image/png' });
-    const base = await collabApi.fetchBase('r1', 'pw');
+    const base = bytes(await collabApi.fetchBase('r1', 'pw'));
     expect(base.variant).toBe('full');
     expect(base.name).toBe('底图');
+  });
+
+  it('带上本地缓存的 ETag 就发 If-None-Match，304 回 notModified', async () => {
+    const fetchMock = binaryStub({}, 304);
+    const etag = '"preview-1-2"';
+    const base = await collabApi.fetchBase('r1', 'pw', { etag });
+    expect(base).toEqual({ notModified: true });
+
+    const init = fetchMock.mock.calls[0]![1] as RequestInit;
+    expect((init.headers as Record<string, string>)['If-None-Match']).toBe(etag);
+    expect((init.headers as Record<string, string>)['X-BF-Room-Pwd']).toBe('pw');
+  });
+
+  // 没有本地缓存时不该凭空发 If-None-Match：那只会换来一个无法满足的 304
+  it('没有 ETag 就不带 If-None-Match', async () => {
+    const fetchMock = binaryStub({ 'Content-Type': 'image/png' });
+    await collabApi.fetchBase('r1', 'pw');
+    const init = fetchMock.mock.calls[0]![1] as RequestInit;
+    expect((init.headers as Record<string, string>)['If-None-Match']).toBeUndefined();
+  });
+
+  // 新字节要带上服务端的校验器，下次才能用 304 换掉整张图
+  it('200 时回带 ETag 供下次校验', async () => {
+    const etag = '"full-9-9"';
+    binaryStub({ ETag: etag, 'Content-Type': 'image/png' });
+    const base = bytes(await collabApi.fetchBase('r1', 'pw'));
+    expect(base.etag).toBe(etag);
   });
 });
 

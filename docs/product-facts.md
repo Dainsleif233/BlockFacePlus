@@ -122,6 +122,9 @@ view.y = view.y + offset.y * (1 - k) + (size.height * (k - 1)) / 2;
 - **覆盖语义**：同一间房、同一个后缀只对应一个文件；换底图 = 覆盖同后缀文件 + 清掉不再被引用的其它后缀，不留孤儿文件（实现见 `backend/src/bfp/storage.py` 与 `backend/src/bfp/base.py`）。
 - **认类型只认字节魔数**：不信任客户端声明的 `Content-Type`，用文件头 32 字节判 PNG / JPEG / WebP / GIF。
 - **读取（`GET /api/rooms/{roomId}/base`）**：按密码鉴权，响应头带 `Content-Type`、`X-BF-Base-Name`（底图名以 percent-encoding 下发，前端 `decodeURIComponent` 解回原名，解不动回退「底图」）、`X-BF-Base-Variant`（`full` / `preview`）、`X-Content-Type-Options: nosniff` 与 `Cache-Control: private, max-age=60`；草稿态（底图还没传）返回 409。
+- **客户端本地缓存（IndexedDB）**：进房时先读上次存下的字节，带着它的 `ETag` 发 `If-None-Match` 问一句 —— 服务端答 `304` 就直接用本地那份渲染，**图一个字节都不用传**；答 200 说明底图换过了，用新的并覆盖本地。
+  缓存条目里存的就是 ETag（而 ETag 里含变体），所以"编辑者看到的预览"与"管理员要的原图"天然是两条记录，换底图也会因为 mtime/大小变化自动失效；**没有 ETag 的条目一律不用**（没法验证就等于把"换了底图"永久藏起来），超过 14 天（房间最长寿命）的也清掉。
+  全部操作都是尽力而为：隐私模式、配额满、库被删都只是"这次没缓存"，绝不影响进房。删房时顺手把本地那份也删掉。
 - **按角色分发像素**：管理员拿原图，其他角色拿预览图（长边 `BF_BASE_PREVIEW_MAX_EDGE`，默认 2048，WebP 优先）。预览在**上传成功后**由服务端生成（Pillow 解码 + LANCZOS 缩放，跑在线程池里），存在 `base/preview/` 子目录 —— 放进子目录而不是 `base/{roomId}.preview.{ext}`，是为了不被原图那套 `{roomId}.*` 的 glob（孤儿清理、备份、回滚）当成"另一种后缀的原图"。预览生成失败**不会**让上传失败：`preview` 落 `NULL`，所有人退回原图。
 - **预览不改变坐标空间（唯一的硬约束）**：`doc.width/height` 与 `baseImage.width/height` 永远是**原图**尺寸，预览只是按同一比例缩小的像素源，前端把它按 `cover` 铺满同一个画布盒子，与用原图渲染逐像素对齐。服务端存的是原图像素坐标 —— 一旦让 `doc` 跟着预览变，所有人的头像位置会整体错位。前端 `loadRoomDocument` 因此显式用 `room.doc` 写底图元数据，而不是图片的 `naturalWidth/Height`。
 - **动图不生成预览**：多帧 GIF / 动画 WebP 抽一帧给非管理员看属于**内容**不一致（不只是清晰度差异），所以直接跳过预览、退回原图。

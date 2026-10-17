@@ -14,6 +14,7 @@
  */
 
 import { computed, reactive, shallowRef } from 'vue';
+import { deleteBaseEntry, readBaseEntry, writeBaseEntry } from '../core/collab/baseCache';
 import { CollabApiError, MAX_BASE_IMAGE_BYTES, chunkBySize, collabApi, formatBytes, fullSubmitTooLarge, mergePatchResults } from '../core/collab/api';
 import {
   advanceBaseline,
@@ -168,11 +169,51 @@ async function enterRoom(password: string): Promise<void> {
       return;
     }
 
-    const base = await collabApi.fetchBase(state.roomId, password);
+    // 先看本地有没有上次存的字节：有就带着它的 ETag 去问，服务端答 304 就从本地读，
+    // 一个字节的图都不用传。ETag 里带变体（预览/原图），所以切角色不会串。
+    let cached = await readBaseEntry(state.roomId);
+    let base = await collabApi.fetchBase(state.roomId, password, { etag: cached?.etag });
+    if (base.notModified && !cached) {
+      // 理论上不会发生（只有带着 ETag 去问才可能收到 304），真碰上就当缓存坏了：
+      // 清掉重问一次，此时没有 ETag，服务端必定回 200。绝不拿空字节去当底图。
+      await deleteBaseEntry(state.roomId);
+      cached = null;
+      base = await collabApi.fetchBase(state.roomId, password);
+    }
+
+    let baseBlob: Blob;
+    let baseName: string;
+    let baseType: string;
+    let baseVariant: 'preview' | 'full';
+    if (base.notModified) {
+      // 走到这里 cached 必然存在（上面已经兜过），TS 需要一句断言帮忙收窄
+      baseBlob = cached!.blob;
+      baseName = cached!.name;
+      baseType = cached!.type;
+      baseVariant = cached!.variant;
+    } else {
+      baseBlob = base.blob;
+      baseName = base.name;
+      baseType = base.type;
+      baseVariant = base.variant;
+      if (base.etag) {
+        // 写缓存失败（配额满、隐私模式）不该影响进房：它只是"下次能省一次下载"
+        void writeBaseEntry({
+          roomId: state.roomId,
+          etag: base.etag,
+          variant: base.variant,
+          name: base.name,
+          type: base.type,
+          blob: base.blob,
+          savedAt: Date.now(),
+        });
+      }
+    }
+
     // 记下这一份是预览还是原图：只影响提示文案。
     // 坐标空间仍然来自 snapshot.room.doc（原图尺寸），两者刻意不混在一起。
-    state.basePreview = base.variant === 'preview';
-    const baseFile = new File([base.blob], base.name, { type: base.type });
+    state.basePreview = baseVariant === 'preview';
+    const baseFile = new File([baseBlob], baseName, { type: baseType });
     state.busyLoading = true;
     try {
       await loadRoomDocument(baseFile, snapshot.avatars, snapshot.room.doc);
@@ -399,6 +440,8 @@ export async function removeRoom(): Promise<void> {
   try {
     await collabApi.deleteRoom(state.roomId, password);
     session.clearRoomPassword(state.roomId);
+    // 房间没了，本地那份底图字节也不会再用到：顺手清掉，别把别人的图留在盘上
+    void deleteBaseEntry(state.roomId);
     notify('success', '房间已删除');
     // e2e 测试口：不真的导航，停在 gone 界面方便断言
     if ((window as unknown as Record<string, unknown>).__BFPLUS_E2E_STAY__) {
