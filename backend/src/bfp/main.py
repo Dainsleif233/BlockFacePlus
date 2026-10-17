@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import tempfile
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -55,6 +56,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         resolved.data_dir.mkdir(parents=True, exist_ok=True)
         resolved.base_dir.mkdir(parents=True, exist_ok=True)
+        # multipart 解析器把 1MB 以上的文件滚进 tempfile 的默认目录（/tmp）。
+        # 生产 unit 里 PrivateTmp=true 让 /tmp 是**内存盘**：一条 50MiB 底图上传就等于
+        # 白吃 50MiB 内存，并发几条还能把 tmpfs 写满、让解析器抛未捕获的 OSError（500 而不是 413）。
+        # 指到数据目录下的 tmp：那里是 StateDirectory，落在磁盘上，也不受 ProtectSystem=strict 限制。
+        spool_dir = resolved.data_dir / "tmp"
+        spool_dir.mkdir(parents=True, exist_ok=True)
+        tempfile.tempdir = str(spool_dir)
         db = Database(resolved.db_path)
         await db.connect()
         app.state.db = db

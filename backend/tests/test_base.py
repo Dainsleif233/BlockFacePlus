@@ -282,6 +282,27 @@ async def test_base_name_is_truncated_and_control_chars_stripped(harness):
     assert header.isascii()
 
 
+async def test_multipart_spool_dir_lives_in_the_data_dir(open_harness, tmp_path):
+    """上传暂存必须落在数据目录，不能落在 /tmp
+
+    生产 unit 里 PrivateTmp=true 让 /tmp 是内存盘：一条 50MiB 底图被解析器滚到那里，
+    就等于白吃 50MiB 内存，几条并发还能把 tmpfs 写满、让解析器抛 OSError（500 而不是 413）。
+    """
+    import tempfile
+
+    original = tempfile.tempdir
+    try:
+        async with open_harness(tmp_path) as harness:
+            assert tempfile.tempdir == str(harness.data_dir / "tmp")
+            assert (harness.data_dir / "tmp").is_dir()
+            # 真正过一次上传：暂存目录用完之后不该留下任何文件
+            room_id, _edit, admin = await harness.create_ok()
+            assert (await harness.upload(room_id, admin)).status_code == 200
+            assert list((harness.data_dir / "tmp").iterdir()) == []
+    finally:
+        tempfile.tempdir = original
+
+
 async def test_avatar_rows_survive_base_upload(harness):
     """底图上传只动 room_base 与字节，绝不碰任何一行头像"""
     room_id, _edit, admin = await harness.create_ok(layers=[draft("l1", x=3), draft("l2", x=4)])
