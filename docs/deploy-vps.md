@@ -297,7 +297,8 @@ rsync -av --delete dist/ blockface@你的服务器:/srv/blockface-plus-web/dist/
 
 nginx 侧用 `deploy/nginx-blockface-plus.conf` 末尾那段注释里的 server 块
 （`root` + `try_files ... /index.html` + `location /api/`）；Caddy 侧用 `deploy/caddy-blockface-plus.conf`
-末尾那段同源配置（`root` + `file_server` + `try_files {path} /index.html`）。
+末尾那段同源配置 —— 注意它是 `handle /api/*` 与 `handle { root + try_files + file_server }` 两个块，
+**不要**把 `try_files` 摊到站点顶层（原因见 5.5 末尾那条提示）。
 此时：
 
 - `BF_CORS_ORIGINS` 不再是必需项（同源请求不触发 CORS），但**别把它设成 `*` 就以为万事大吉**，
@@ -328,13 +329,17 @@ sudo systemctl reload caddy
 
 装完 `https://api.example.com/api/health` 就该通了，**不需要再装 certbot**，5.2 整节跳过。
 
-三处默认行为与 nginx 相反，样例文件里每条都写了理由，这里只列结论：
+几处默认行为与 nginx 相反，样例文件里每条都写了理由，这里只列结论：
 
 1. **请求体默认没有上限。** nginx 要显式 `client_max_body_size 68m` 去放宽，Caddy 反过来 ——
    它默认不限，样例里那句 `request_body { max_size 71303168 }` 是**主动收紧**，不是放开。
    它同样必须 ≥ `BF_MAX_JSON_BODY_BYTES`；比后端小的话，413 就来自 Caddy 而不是后端。
 2. **请求体默认不缓冲。** 对应 nginx 的 `proxy_request_buffering off`，Caddy 不需要配。
-3. **访问日志默认会把请求头整份记下来**（nginx 默认不记），而密码就在 `X-BF-Room-Pwd` 里。
+3. **超时默认是不超时，不是 60s。** nginx 那份的 `client_body_timeout` 与三行 `*_timeout 300s`
+   都是在**放宽**它自己的 60s；Caddy 的 `write` / `read_body` / 上游 `read_timeout` 默认就没有上限，
+   而 `read_body_idle` / `write_idle` 默认 1m 是「卡住不动」的判定、每成功收发一次就重置。
+   所以 Caddy 那份**不写**这些超时 —— 照抄 nginx 的 300s 反而是把无限制收窄。
+4. **访问日志默认会把请求头整份记下来**（nginx 默认不记），而密码就在 `X-BF-Room-Pwd` 里。
    样例用 `format filter` 把 `request.headers` 删掉再写文件。**你要改这段日志配置的话，记得别把密码写进磁盘。**
    验证只要一句：
 
@@ -345,6 +350,12 @@ sudo grep -c 'x-bf-room-pwd' /var/log/caddy/blockface-plus.access.log   # 期望
 
 反代起来之后，5.3 的 curl 验证、5.4 的同源部署（样例文件末尾也给了 Caddy 版）、以及第 6 节往后的
 边缘 Pages 部分**都不变**。
+
+> ⚠️ 同源部署那段是**有坑**的，样例里特意写了反例：把 `root` / `file_server` / `try_files`
+> 平铺在站点顶层、再把 `handle /api/*` 也放在顶层，看着最自然，但 `try_files` 按指令顺序排在
+> `handle` 之前，**会把 /api 的请求一起 rewrite 到 index.html** —— 表现为前端拿到一坨 HTML 当 JSON 解析。
+> 正确写法是 `/api` 与静态文件各占一个 `handle`，`try_files` 只在静态那个 `handle` 里生效。
+> 照着样例末尾那段抄，别自己重排。
 
 ---
 
