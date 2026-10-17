@@ -49,9 +49,9 @@ async def test_layout_patch_clamps_instead_of_rejecting(harness):
     )
     assert response.json()["results"][0]["ok"] is True
     avatar = (await snapshot(harness, room_id, admin))["avatars"][0]
-    assert avatar["x"] == 10_000_000
-    assert avatar["y"] == -10_000_000
-    assert avatar["size"] == 262_144
+    assert avatar["x"] == 100_000
+    assert avatar["y"] == -100_000
+    assert avatar["size"] == 16_384
     assert avatar["rotation"] == 3600
 
 
@@ -281,8 +281,8 @@ async def test_adds_are_normalized_like_create(harness):
         admin,
         {
             "adds": [
-                # size 100000 在新上限（262144）之内，原样保留；超上限的才夹回去
-                {"id": "l9", "size": 100000, "rotation": "720", "overlay": "不是布尔", "visible": False, "skin": VALID_SKIN},
+                # size 8000 在上限（16384）之内，原样保留；超上限的才夹回去
+                {"id": "l9", "size": 8000, "rotation": "720", "overlay": "不是布尔", "visible": False, "skin": VALID_SKIN},
                 {"id": "l10", "size": 10**9, "x": 10**12, "y": -(10**12)},
                 # 不是对象的那条会被直接过滤掉（与旧实现的 .filter(isRecord) 一致），
                 # 所以结果里不会出现它；id 不合法的那种才会回 invalid
@@ -297,7 +297,7 @@ async def test_adds_are_normalized_like_create(harness):
     assert results[2]["ok"] is False and results[2]["error"] == "invalid"
 
     avatar = next(a for a in (await snapshot(harness, room_id, admin))["avatars"] if a["id"] == "l9")
-    assert avatar["size"] == 100_000
+    assert avatar["size"] == 8_000
     assert avatar["rotation"] == 720
     assert avatar["overlay"] is True  # 非 false 一律 true
     assert avatar["visible"] is False
@@ -305,6 +305,6 @@ async def test_adds_are_normalized_like_create(harness):
     assert avatar["skin"] == VALID_SKIN
 
     clamped = next(a for a in (await snapshot(harness, room_id, admin))["avatars"] if a["id"] == "l10")
-    assert clamped["size"] == 262_144  # 夹到上限
-    assert clamped["x"] == 10_000_000
-    assert clamped["y"] == -10_000_000
+    assert clamped["size"] == 16_384  # 夹到上限（= 画布边长上限，图层不可能比画布还大）
+    assert clamped["x"] == 100_000
+    assert clamped["y"] == -100_000

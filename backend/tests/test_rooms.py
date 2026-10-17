@@ -6,7 +6,7 @@ from __future__ import annotations
 import re
 import time
 
-from conftest import JPEG_BYTES, draft, pwd
+from conftest import JPEG_BYTES, draft, pwd, room_body
 
 from bfp.security import now_ms
 
@@ -93,14 +93,21 @@ async def test_create_rejects_layer_problems(harness):
     assert duplicated.json()["error"] == "头像 id 重复"
 
 
-async def test_create_rejects_out_of_range_expiry_days(harness):
-    for days in (0, -1, 3651, "abc", None, 1.5e9):
+async def test_create_only_accepts_the_three_expiry_options(harness):
+    """过期天数是白名单 3/7/14，不是区间 —— 与旧云函数的 has() 判断、UI 的三个按钮一致"""
+    for days in (0, -1, 1, 15, 30, 90, 3650, 3.5, "abc", None, 1.5e9):
         response = await harness.create(expires_days=days)
         assert response.status_code == 400, days
-        assert "过期天数" in response.json()["error"]
+        assert response.json()["error"] == "过期天数只能是 3 / 7 / 14 天"
 
-    # 边界内的都放行（契约：1..BF_MAX_EXPIRY_DAYS，前端 UI 只提供 3/7/14/30/90）
-    for days in (1, 3, 90, 3650):
+    # 干脆不带这个字段也走同一条 400，而不是 500
+    body = room_body()
+    body.pop("expiresDays")
+    missing = await harness.client.post("/api/rooms", json=body)
+    assert missing.status_code == 400
+    assert missing.json()["error"] == "过期天数只能是 3 / 7 / 14 天"
+
+    for days in (3, 7, 14):
         assert (await harness.create(expires_days=days)).status_code == 201
 
 

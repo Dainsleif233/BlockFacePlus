@@ -1,7 +1,7 @@
 # BlockFace+ · 底图字节落盘
 # Copyright 2026 Dainsleif · Apache License 2.0
 #
-# 底图不进数据库：SQLite 里存 128MiB 的 BLOB 会让库文件暴涨、备份变慢、WAL 疯狂膨胀。
+# 底图不进数据库：SQLite 里存 50MiB 的 BLOB 会让库文件暴涨、备份变慢、WAL 疯狂膨胀。
 # 库里的 room_base 只存"指针"（后缀 + MIME + 名字 + 尺寸），字节躺在文件系统上：
 #   {BF_DATA_DIR}/base/{roomId}.{ext}
 #
@@ -84,7 +84,7 @@ class StagedBaseImage:
         staged.abort()          # 任何失败路径都必须调用（清掉半截文件）
         staged.commit(ext)      # 原子替换到最终路径，并清掉该房间其它后缀
 
-    为什么上传不是"先读进内存再判断"：底图上限 128MiB，先攒内存等于把限制装在内存耗尽之后。
+    为什么上传不是"先读进内存再判断"：底图上限 50MiB，先攒内存等于把限制装在内存耗尽之后。
 
     为什么 write() 直接在事件循环里写句柄、而 commit() 却要 to_thread：
     write 收到的分片是 64KiB（base.py 的 CHUNK_SIZE），落到带缓冲的文件对象上通常只是一次

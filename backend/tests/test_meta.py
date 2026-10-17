@@ -10,17 +10,16 @@ from conftest import pwd
 
 DEFAULT_CONFIG = {
     "version": "0.2.0",
-    "expiryDays": [3, 7, 14, 30, 90],
-    "maxExpiryDays": 3650,
-    "maxLayers": 10000,
-    "maxBaseImageBytes": 134217728,
-    "maxSkinDataUrlChars": 32000000,
-    "maxJsonBodyBytes": 268435456,
-    "maxDocSize": 65536,
-    "minLayerSize": 1,
-    "maxLayerSize": 262144,
-    "maxAvatarName": 512,
-    "maxPosition": 10000000,
+    "expiryDays": [3, 7, 14],
+    "maxLayers": 512,
+    "maxBaseImageBytes": 52428800,
+    "maxSkinDataUrlChars": 5000000,
+    "maxJsonBodyBytes": 67108864,
+    "maxDocSize": 16384,
+    "minLayerSize": 16,
+    "maxLayerSize": 16384,
+    "maxAvatarName": 200,
+    "maxPosition": 100000,
 }
 
 
@@ -51,21 +50,29 @@ async def test_unknown_route_and_wrong_method_keep_the_error_shape(harness):
     assert "GET" in wrong_method.headers["allow"]
 
 
-async def test_config_returns_relaxed_defaults(harness):
+async def test_config_returns_the_published_limits(harness):
     response = await harness.client.get("/api/config")
     assert response.status_code == 200
     assert response.json() == DEFAULT_CONFIG
 
 
-async def test_config_defaults_are_way_above_the_old_platform_limits():
-    """放宽是本轮改造的目的之一，这里把"放宽了多少"钉成断言，防止被无意改回去"""
-    assert DEFAULT_CONFIG["maxBaseImageBytes"] > 10 * 1024 * 1024  # 旧：10MB
-    assert DEFAULT_CONFIG["maxJsonBodyBytes"] > 6 * 1024 * 1024  # 旧：平台硬限 6MB
-    assert DEFAULT_CONFIG["maxLayers"] > 512  # 旧：512 行
-    assert DEFAULT_CONFIG["maxExpiryDays"] > 14  # 旧：3/7/14
-    assert DEFAULT_CONFIG["minLayerSize"] < 16  # 旧：16
-    assert DEFAULT_CONFIG["maxLayerSize"] > 4096  # 旧：4096
-    assert DEFAULT_CONFIG["maxAvatarName"] > 200  # 旧：200
+async def test_config_defaults_are_pinned_by_the_contract():
+    """契约第 4 节那张表就是这份数值 —— 改上限必须先改契约，所以在这里钉死。
+
+    相对旧云函数（cloud-functions/api/lib.js 里那批硬编码常量）只剩这么几处不同：
+    底图 10MiB → 50MiB、单条皮肤 1.5M → 5M 字符、画布 8192 → 16384（坐标与图层上限跟着走）、
+    几何上限改成可配的旋钮；头像行数 512、名字 200、失败次数 10 与 3/7/14 的过期档位都已回到旧值。
+    """
+    assert DEFAULT_CONFIG["maxLayers"] == 512
+    assert DEFAULT_CONFIG["maxAvatarName"] == 200
+    assert DEFAULT_CONFIG["maxBaseImageBytes"] == 50 * 1024 * 1024
+    assert DEFAULT_CONFIG["maxSkinDataUrlChars"] == 5_000_000
+    assert DEFAULT_CONFIG["maxDocSize"] == 16_384
+    assert DEFAULT_CONFIG["maxLayerSize"] == DEFAULT_CONFIG["maxDocSize"]  # 图层最大就是一个画布
+    assert DEFAULT_CONFIG["minLayerSize"] == 16
+    assert DEFAULT_CONFIG["maxJsonBodyBytes"] == 64 * 1024 * 1024
+    assert DEFAULT_CONFIG["maxPosition"] == 100_000
+    assert DEFAULT_CONFIG["expiryDays"] == [3, 7, 14]
 
 
 async def test_config_follows_env_overrides(open_harness, tmp_path):
@@ -73,12 +80,15 @@ async def test_config_follows_env_overrides(open_harness, tmp_path):
         tmp_path,
         BF_MAX_LAYERS="17",
         BF_MAX_BASE_IMAGE_BYTES="2048",
+        BF_MAX_DOC_SIZE="4096",
+        # 过期档位不是可配项：这个旋钮已经删掉，写进环境也不生效
         BF_MAX_EXPIRY_DAYS="30",
     ) as harness:
         payload = (await harness.client.get("/api/config")).json()
         assert payload["maxLayers"] == 17
         assert payload["maxBaseImageBytes"] == 2048
-        assert payload["maxExpiryDays"] == 30
+        assert payload["maxDocSize"] == 4096
+        assert payload["expiryDays"] == [3, 7, 14]
 
 
 async def test_cors_preflight_allows_password_header_and_exposes_base_name(harness):

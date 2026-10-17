@@ -22,7 +22,7 @@ import aiosqlite
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from .config import Settings
+from .config import EXPIRY_DAYS, Settings
 from .db import Database
 from .errors import (
     ROOM_EXPIRED,
@@ -39,7 +39,6 @@ from .normalize import (
     normalize_base_name,
     normalize_doc_size,
     normalize_room_id,
-    round_js,
     to_number,
 )
 from .security import (
@@ -212,15 +211,15 @@ async def create_room(request: Request) -> JSONResponse:
         layers.append(record)
 
     days = to_number(body.get("expiresDays"))
-    if not math.isfinite(days):
-        raise ApiError(400, f"过期天数只能在 1 到 {settings.max_expiry_days} 天之间")
-    days = round_js(days)
-    if days < 1 or days > settings.max_expiry_days:
-        raise ApiError(400, f"过期天数只能在 1 到 {settings.max_expiry_days} 天之间")
+    # 白名单而不是区间：能选的就只有 UI 上那三个按钮，替 3.5 天这种值四舍五入没人需要。
+    # to_number 把 None/缺失对齐成 0，所以「没带这个字段」也走同一条 400。
+    if not math.isfinite(days) or days not in EXPIRY_DAYS:
+        raise ApiError(400, "过期天数只能是 3 / 7 / 14 天")
+    days = int(days)
 
     room_id = generate_room_id()
     now = now_ms()
-    # 毫秒整数时间戳，与前端 Date.now() 同一口径；契约 4 节里上限放宽到 3650 天
+    # 毫秒整数时间戳，与前端 Date.now() 同一口径
     expires_at = now + days * DAY_MS
     edit_password = generate_edit_password()
     admin_password = generate_admin_password()

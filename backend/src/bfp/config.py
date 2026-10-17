@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-__all__ = ["BACKEND_DIR", "DEFAULT_VERSION", "Settings"]
+__all__ = ["BACKEND_DIR", "DEFAULT_VERSION", "EXPIRY_DAYS", "Settings"]
 
 # config.py 在 backend/src/bfp/ 下，往上三级就是 backend/
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -24,6 +24,11 @@ BACKEND_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_VERSION = "0.2.0"
 
 _DAY_SECONDS = 86_400
+
+# 过期天数只有这三档：是白名单，不是区间。
+# 前端的 core/collab/types.ts 与 /api/config 的 expiryDays 都以这一份为准，
+# 所以它不挂在环境变量上 —— 能配的话迟早会和 UI 给出的按钮对不上。
+EXPIRY_DAYS: tuple[int, ...] = (3, 7, 14)
 
 
 def _env_int(env: Mapping[str, str], name: str, default: int, *, minimum: int = 0) -> int:
@@ -63,7 +68,7 @@ class Settings:
     host: str
     port: int
 
-    # 公开上限（默认值 = 契约第 4 节放宽后的数值）
+    # 公开上限（默认值 = 契约第 4 节的数值）
     max_layers: int
     max_skin_data_url_chars: int
     max_base_image_bytes: int
@@ -73,7 +78,6 @@ class Settings:
     max_layer_size: int
     max_avatar_name: int
     max_json_body_bytes: int
-    max_expiry_days: int
 
     # 限流与清扫
     auth_window_seconds: int
@@ -89,8 +93,8 @@ class Settings:
         if not data_dir.is_absolute():
             # 相对路径以 backend/ 为基准，理由见文件头
             data_dir = BACKEND_DIR / data_dir
-        min_layer_size = _env_int(source, "BF_MIN_LAYER_SIZE", 1, minimum=1)
-        max_layer_size = _env_int(source, "BF_MAX_LAYER_SIZE", 262_144, minimum=1)
+        min_layer_size = _env_int(source, "BF_MIN_LAYER_SIZE", 16, minimum=1)
+        max_layer_size = _env_int(source, "BF_MAX_LAYER_SIZE", 16_384, minimum=1)
         if max_layer_size < min_layer_size:
             raise SystemExit(
                 f"环境变量 BF_MAX_LAYER_SIZE（{max_layer_size}）不能小于 BF_MIN_LAYER_SIZE（{min_layer_size}）"
@@ -102,18 +106,17 @@ class Settings:
             trusted_hosts=_env_list(source, "BF_TRUSTED_HOSTS", "*"),
             host=_env_str(source, "BF_HOST", "127.0.0.1"),
             port=_env_int(source, "BF_PORT", 8088, minimum=1),
-            max_layers=_env_int(source, "BF_MAX_LAYERS", 10_000, minimum=1),
-            max_skin_data_url_chars=_env_int(source, "BF_MAX_SKIN_DATA_URL_CHARS", 32_000_000, minimum=1),
-            max_base_image_bytes=_env_int(source, "BF_MAX_BASE_IMAGE_BYTES", 134_217_728, minimum=1),
-            max_doc_size=_env_int(source, "BF_MAX_DOC_SIZE", 65_536, minimum=1),
-            max_position=_env_int(source, "BF_MAX_POSITION", 10_000_000, minimum=0),
+            max_layers=_env_int(source, "BF_MAX_LAYERS", 512, minimum=1),
+            max_skin_data_url_chars=_env_int(source, "BF_MAX_SKIN_DATA_URL_CHARS", 5_000_000, minimum=1),
+            max_base_image_bytes=_env_int(source, "BF_MAX_BASE_IMAGE_BYTES", 52_428_800, minimum=1),
+            max_doc_size=_env_int(source, "BF_MAX_DOC_SIZE", 16_384, minimum=1),
+            max_position=_env_int(source, "BF_MAX_POSITION", 100_000, minimum=0),
             min_layer_size=min_layer_size,
             max_layer_size=max_layer_size,
-            max_avatar_name=_env_int(source, "BF_MAX_AVATAR_NAME", 512, minimum=1),
-            max_json_body_bytes=_env_int(source, "BF_MAX_JSON_BODY_BYTES", 268_435_456, minimum=1),
-            max_expiry_days=_env_int(source, "BF_MAX_EXPIRY_DAYS", 3650, minimum=1),
+            max_avatar_name=_env_int(source, "BF_MAX_AVATAR_NAME", 200, minimum=1),
+            max_json_body_bytes=_env_int(source, "BF_MAX_JSON_BODY_BYTES", 67_108_864, minimum=1),
             auth_window_seconds=_env_int(source, "BF_AUTH_WINDOW_SECONDS", 60, minimum=1),
-            auth_max_fails=_env_int(source, "BF_AUTH_MAX_FAILS", 20, minimum=1),
+            auth_max_fails=_env_int(source, "BF_AUTH_MAX_FAILS", 10, minimum=1),
             draft_ttl_seconds=_env_int(source, "BF_DRAFT_TTL_SECONDS", _DAY_SECONDS, minimum=1),
             sweep_interval_seconds=_env_int(source, "BF_SWEEP_INTERVAL_SECONDS", 1800, minimum=0),
         )
@@ -132,8 +135,7 @@ class Settings:
         """GET /api/config 的响应体（契约 2.8）：只回公开上限，不泄漏任何存储/路径信息"""
         return {
             "version": self.version,
-            "expiryDays": [3, 7, 14, 30, 90],
-            "maxExpiryDays": self.max_expiry_days,
+            "expiryDays": list(EXPIRY_DAYS),
             "maxLayers": self.max_layers,
             "maxBaseImageBytes": self.max_base_image_bytes,
             "maxSkinDataUrlChars": self.max_skin_data_url_chars,
