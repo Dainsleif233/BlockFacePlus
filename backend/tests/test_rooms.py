@@ -219,6 +219,18 @@ async def test_expired_room_is_deleted_in_place_and_returns_410(harness):
     assert (await harness.upload(rid, admin)).status_code == 410
 
 
+async def test_deeply_nested_json_body_is_400_not_500(harness):
+    """[[[[… 撞的是解释器递归上限：这是客户端的问题，不该变成 500「服务器开小差了」"""
+    body = "[" * 4000 + "]" * 4000
+    response = await harness.client.post(
+        "/api/rooms",
+        content=body,
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 400
+    assert response.json()["error"] == "请求体不是合法 JSON"
+
+
 async def test_default_data_dir_lives_under_backend(monkeypatch):
     """相对 BF_DATA_DIR 一律相对 backend/ 解析：默认值不能随 cwd 乱飘"""
     from bfp.config import BACKEND_DIR, Settings

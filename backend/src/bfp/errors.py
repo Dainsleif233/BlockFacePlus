@@ -79,3 +79,7 @@ async def read_json_body(request: Request, max_bytes: int) -> Any:
         return json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError):
         raise ApiError(400, "请求体不是合法 JSON") from None
+    except RecursionError:
+        # 深嵌套（几 KB 的 [[[[…）撞的是解释器递归上限，不是服务端故障：
+        # 不接住就会一路冒到兜底处理器变成 500「服务器开小差了」，而契约要求这里是 400。
+        raise ApiError(400, "请求体不是合法 JSON") from None
