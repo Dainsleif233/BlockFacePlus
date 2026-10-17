@@ -59,7 +59,11 @@ export default defineConfig(({ mode }) => {
     "default-src 'self'",
     "script-src 'self'",
     "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' data: blob: https://textures.minecraft.net https://mc-heads.net https://minotar.net",
+    "img-src 'self' data: blob: https://textures.minecraft.net https://mc-heads.net https://minotar.net" +
+      // 跨域图片的代理兜底（editor.ts 的 DEFAULT_PROXY_TEMPLATE）。少了这一条，
+      // 生产构建里第 2 级兜底会被 CSP 直接拦死，而 dev 不注入 CSP，本地永远复现不出来。
+      // 换了代理模板，这里要跟着换。
+      " https://images.weserv.nl",
     "connect-src 'self'" + (apiCspOrigin ? ' ' + apiCspOrigin : '') + ' https://playerdb.co',
     "font-src 'self'",
     "object-src 'none'",

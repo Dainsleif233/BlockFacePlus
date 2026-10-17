@@ -1,6 +1,7 @@
 <!-- BlockFace · Copyright 2026 Dainsleif · Apache License 2.0 -->
 <script setup lang="ts">
 import { computed } from 'vue';
+import { collab } from '../stores/collab';
 import { editor, fitView, mobilePanel, toggleMobilePanel } from '../stores/editor';
 
 const zoomLabel = computed(() =>
@@ -9,6 +10,14 @@ const zoomLabel = computed(() =>
 const activeRecord = computed(() => editor.skins.find((s) => s.id === editor.activeSkinId) ?? null);
 const baseLabel = computed(() =>
   editor.baseImage ? editor.baseImage.width + ' × ' + editor.baseImage.height : '未设置',
+);
+/**
+ * 这句是隐私声明，不是装饰：离线时图片确实一步都没出浏览器，
+ * 但进了房间，底图与每一张皮肤都已经存在服务器上了。房间模式下继续挂
+ * "图片不上传" 就是一句明确的假话 —— 而且恰好出现在分享链接那个场景。
+ */
+const privacyLabel = computed(() =>
+  collab.mode === 'room' ? '房间协作 · 图片经服务器同步' : '本地计算 · 图片不上传',
 );
 const skinLabel = computed(() => {
   const record = activeRecord.value;
@@ -30,7 +39,7 @@ const skinLabel = computed(() => {
         <span class="beat" aria-hidden="true">
           <i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i />
         </span>
-        <span>本地计算 · 图片不上传</span>
+        <span>{{ privacyLabel }}</span>
       </span>
     </div>
 
