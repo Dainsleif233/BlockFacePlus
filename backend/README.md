@@ -51,7 +51,8 @@ backend/
 
 - `BF_DATA_DIR`（默认 `./data`）：**相对路径一律相对 backend/ 目录解析**，与启动时的 cwd 无关。
   也就是说默认值永远落在 `backend/data`。生产建议写绝对路径（如 `/var/lib/blockface-plus`）。
-  库文件固定在 `{BF_DATA_DIR}/bfp.sqlite3`，底图固定在 `{BF_DATA_DIR}/base/{roomId}.{ext}`。
+  库文件固定在 `{BF_DATA_DIR}/bfp.sqlite3`，底图固定在 `{BF_DATA_DIR}/base/{roomId}.{ext}`，
+  multipart 解析的临时暂存固定在 `{BF_DATA_DIR}/tmp`（见下面"数据与存储"）。
 - 非法整数会让服务**起不来**并打印中文原因（fail fast）。宁可起不来，也不要带着错配置跑。
 
 ## 数据与存储
@@ -66,7 +67,10 @@ backend/
 - SQLite 开 WAL、`busy_timeout=5000`、`foreign_keys=ON`；单连接 + 写锁，所有写路径都走 `transaction()`。
 - 底图字节**不进数据库**，落 `{BF_DATA_DIR}/base/{roomId}.{ext}`；写入是"临时文件 → fsync → os.replace"，
   所以不会出现"库里指针指向半张图"。同一间房同一后缀只有一个文件，换底图会覆盖并清掉其它后缀。
-- 备份 = 拷 `BF_DATA_DIR` 整个目录（库 + base/）。热备份时先 `sqlite3 bfp.sqlite3 ".backup ..." ` 或直接停服。
+- multipart 上传的暂存文件落 `{BF_DATA_DIR}/tmp`：starlette 把 1MB 以上的 part 滚进
+  `tempfile` 的默认目录，而生产 unit 里 `PrivateTmp=true` 让 `/tmp` 是内存盘 —— 50MiB 的底图
+  会白吃 50MiB 内存。启动时把 `tempfile.tempdir` 指到数据目录，顺带也就跟着 `StateDirectory` 一起被授权。
+- 备份 = 拷 `BF_DATA_DIR` 整个目录（库 + base/ + tmp/，tmp 里只有半截上传，可以不管）。热备份时先 `sqlite3 bfp.sqlite3 ".backup ..." ` 或直接停服。
 
 ## 运维命令行
 

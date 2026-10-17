@@ -135,7 +135,7 @@ sudo systemctl restart blockface-plus-api
 
 | 变量 | 默认值 | 含义与什么时候要动它 |
 | :-- | :-- | :-- |
-| ★ `BF_DATA_DIR` | `./data` | SQLite 与底图的根目录。生产固定 `/var/lib/blockface-plus`，必须与 unit 里的 `StateDirectory=blockface-plus` 一致（systemd 就是按这个名字建目录并授权的）。放在代码目录里，迟早会被某次 `git clean` 或重新部署顺手带走。 |
+| ★ `BF_DATA_DIR` | `./data` | SQLite、底图与 multipart 上传暂存（`{BF_DATA_DIR}/tmp`）的根目录。生产固定 `/var/lib/blockface-plus`，必须与 unit 里的 `StateDirectory=blockface-plus` 一致（systemd 就是按这个名字建目录并授权的）。放在代码目录里，迟早会被某次 `git clean` 或重新部署顺手带走。 |
 | ★ `BF_CORS_ORIGINS` | `*` | 逗号分隔的浏览器来源白名单，**只写 scheme+host+port，不带路径、不带结尾斜杠**。同一个 Pages 站点有多个域名（自定义域 + 平台域）就都写上。默认 `*` 只适合本机联调。 |
 | `BF_TRUSTED_HOSTS` | `*` | 允许的 Host 头，逗号分隔。走反向代理（nginx / Caddy）时可以收成后端域名；守着 IP 直连 uvicorn 的场景才需要它。 |
 | `BF_MAX_LAYERS` | `512` | 一间房最多多少行头像（与旧云函数版本一致）。这个值决定一次进房要读多少行，影响的是**进房速度**而不是容量。 |

@@ -84,6 +84,7 @@ view.y = view.y + offset.y * (1 - k) + (size.height * (k - 1)) / 2;
 ### 4.1 存储底座与表布局
 - 元数据落 SQLite（`{BF_DATA_DIR}/bfp.sqlite3`）：WAL 日志模式，单连接 + 应用层写锁，所有写路径都走 `Database.transaction()`（`BEGIN IMMEDIATE` + 异常回滚），写与写之间天然串行 —— 业务层不必再叠一把锁，也不会出现两个写者交叉覆盖。
 - 底图字节**不进数据库**，落本地文件 `{BF_DATA_DIR}/base/{roomId}.{ext}`：同一间房、同一个后缀只对应一个文件，换底图就是覆盖它并清掉同房间不再被引用的其它后缀，不留孤儿文件。
+- multipart 上传的暂存落 `{BF_DATA_DIR}/tmp`：解析器会把 1MB 以上的 part 滚进 `tempfile` 的默认目录，而生产 unit 的 `PrivateTmp=true` 让 `/tmp` 是内存盘（一条 50MiB 底图就白吃 50MiB 内存），所以启动时把 `tempfile.tempdir` 指到数据目录。
 - **四张表各有一个主人，物理上互不重叠**（表结构见 `backend/src/bfp/schema.sql`）：
 
 | 表 | 存什么 | 谁写 |
@@ -110,7 +111,7 @@ view.y = view.y + offset.y * (1 - k) + (size.height * (k - 1)) / 2;
   - `deletes: [id]`：幂等，不比对版本戳。
   - 逐条返回 `{ results: [{ id, ok, error?, skinUpdatedAt?, layoutUpdatedAt? }] }`：某一条失败不影响同批其它条目；成功条目回带新版本戳，客户端只把成功的那些行推进基线，失败的原样留在「待提交」里。
   - 角色：编辑者只能带 `skin`（带了 `layout` 也照样不写入，不报错），`adds`/`deletes` 一律 403；管理员三者皆可。
-  - 边界只有体积：单次请求体上限是 `BF_MAX_JSON_BODY_BYTES`（默认 64MiB；旧云函数版本受平台硬限只有 6MiB），前端 `chunkBySize` 按体积切块、**条数不设限**；一次能提到的行数上限就是「一间房最多 `BF_MAX_LAYERS`（默认 512）行」这个真实上限。
+  - 边界只有体积：单次请求体上限是 `BF_MAX_JSON_BODY_BYTES`（默认 64MiB；旧云函数版本受平台硬限只有 6MiB），前端 `chunkBySize` 按体积切块、**条数不设限**；单次能提到的行数上限就是「一间房最多 `BF_MAX_LAYERS`（默认 512）行」这个真实上限 —— 服务端是按**房间累计**判的（当前行数 − 本批真实删除 + 本次 adds），不是按请求判。
 - **全量覆盖（`PUT /api/rooms/{roomId}`）已拆除**：契约里没有这个端点；`ifRevision` 乐观锁、房间级 `revision`、`MAX_PATCH_UPDATES` 一并消失。
 - **删除（`DELETE /api/rooms/{roomId}`）**：仅管理员，物理删除该房间的全部数据 —— `rooms` 里那一行（外键 `ON DELETE CASCADE` 带走 `room_base` / `avatars` / `room_throttle`）与 `base/` 下的底图文件。
 

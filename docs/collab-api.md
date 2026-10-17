@@ -12,8 +12,9 @@
 - 跨域：后端按 `BF_CORS_ORIGINS` 配置 CORS，允许方法 `GET/POST/PATCH/DELETE/OPTIONS`，
   允许头 `X-BF-Room-Pwd, Content-Type`，暴露头 `X-BF-Base-Name`。
 - 错误响应统一为 `{"error": "<中文人话>"}`，HTTP 状态码语义：
-  `400` 入参不合法 / `401` 密码不对 / `403` 角色不够 / `404` 房间不存在 /
-  `409` 状态未就绪 / `410` 房间已过期 / `413` 体积超限 / `429` 试错太频繁。
+  `400` 入参不合法（含超过一间房的行数上限）/ `401` 密码不对 / `403` 角色不够 /
+  `404` 房间不存在 / `409` 状态未就绪 / `410` 房间已过期 / `413` 体积超限 /
+  `429` 试错太频繁。
 - **框架层**的状态码也走同一形状与同一份中文文案表（`main.py` 的 `_HTTP_MESSAGES`）：
   `404` 路径不存在、`405` 方法不对、`415` 内容类型不支持。正常客户端碰不到它们，
   但真碰上时不该看到一个英文的 `{"detail": ...}` —— 前端只认 `error` 字段。
@@ -94,6 +95,12 @@
 
 角色约束：编辑者只能 `updates[].skin`；带 `layout` 一律忽略（不报错），带 `adds`/`deletes` 返回 403。
 单条结果 `error` 取值：`invalid | invalid-layout | invalid-skin | not-found | exists | conflict`。
+
+`adds` 还会被**房间总行数**挡一道：房间当前行数 − 本次真实删除的行数 + 本次 `adds` 条数
+超过 `BF_MAX_LAYERS` 时整批 `400`（响应体是
+`{"error": "这间房已经有 N 个头像，再加 M 个会超过一间房的上限（512）：先删几个再试"}`），
+同一批里的 `updates` / `deletes` 一并回滚。上限是按房间算的，不是按请求算的 —— 单次请求的条数上限
+只是"一次别让我处理太多"，换个口径就等于没有上限。删一个**不存在**的 id 只是幂等成功，不腾位置。
 
 ### 2.5 `POST /api/rooms/{roomId}/base` — 上传 / 更换底图
 
@@ -177,7 +184,7 @@
 
 | 环境变量 | 默认值 | 旧 EdgeOne 版本 | 说明 |
 | :-- | --: | --: | :-- |
-| `BF_MAX_LAYERS` | 512 | 512 | 一间房最多多少行头像 |
+| `BF_MAX_LAYERS` | 512 | 512 | 一间房最多多少行头像（**按房间累计**，超了整批 400） |
 | `BF_MAX_SKIN_DATA_URL_CHARS` | 5000000 | 1500000 | 单条内嵌皮肤 data URI 字符数 |
 | `BF_MAX_BASE_IMAGE_BYTES` | 52428800 (50MiB) | 10485760 | 底图字节上限 |
 | `BF_MAX_DOC_SIZE` | 16384 | 8192 | 画布边长上限 |
@@ -194,7 +201,7 @@
 
 | 变量 | 默认值 | 说明 |
 | :-- | :-- | :-- |
-| `BF_DATA_DIR` | `./data` | SQLite 与底图字节的根目录（生产建议 `/var/lib/blockface-plus`） |
+| `BF_DATA_DIR` | `./data` | SQLite、底图字节与 multipart 上传暂存（`tmp/`）的根目录（生产建议 `/var/lib/blockface-plus`） |
 | `BF_CORS_ORIGINS` | `*` | 逗号分隔的来源白名单，生产建议填 Pages 域名 |
 | `BF_HOST` / `BF_PORT` | `127.0.0.1` / `8088` | 仅 `python -m bfp` 自启时使用 |
 | `BF_TRUSTED_HOSTS` | `*` | 逗号分隔 |
