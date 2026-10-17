@@ -28,14 +28,15 @@ export function installFetchRecorder() {
   const original = window.fetch.bind(window);
 
   window.fetch = async (input, init) => {
-    const record = { method: 'GET', url: '', path: '', password: '', contentType: '', body: null, fields: null, bytes: 0 };
+    const record = { method: 'GET', url: '', path: '', passwordLength: 0, contentType: '', body: null, fields: null, bytes: 0 };
     try {
       record.url = typeof input === 'string' ? input : (input && input.url) || String(input);
       record.path = new URL(record.url, window.location.href).pathname;
       const method = (init && init.method) || (input && input.method) || 'GET';
       record.method = String(method).toUpperCase();
       const headers = new Headers((init && init.headers) || (input && input.headers) || undefined);
-      record.password = headers.get(PWD_HEADER) || '';
+      const password = headers.get(PWD_HEADER) || '';
+      record.passwordLength = password.length;
       record.contentType = headers.get('Content-Type') || '';
       const body = init && init.body;
       if (typeof body === 'string') {

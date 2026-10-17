@@ -5,12 +5,13 @@
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import threading
 
 from conftest import PNG_BYTES, pwd
 
-from bfp.security import now_ms
+from bfp.security import _AUTH_LOCKS, now_ms
 
 WRONG = "wrong123"  # 8 位，长度与编辑密码一致，会真的跑一次 scrypt
 
@@ -90,6 +91,14 @@ async def test_throttle_is_per_room(open_harness, tmp_path):
         assert (await harness.client.get(f"/api/rooms/{locked_room}", headers=pwd(other_admin))).status_code == 429
         # 另一间房完全不受影响：不能按 IP 连坐
         assert (await harness.client.get(f"/api/rooms/{other_room}", headers=pwd(other_admin))).status_code == 200
+
+
+async def test_auth_locks_do_not_retain_deleted_room_ids(harness):
+    room_id, _edit, admin = await harness.create_ok()
+    assert (await harness.client.get(f"/api/rooms/{room_id}", headers=pwd(admin))).status_code == 200
+    assert room_id not in _AUTH_LOCKS
+    gc.collect()
+    assert len(_AUTH_LOCKS) == 0
 
 
 async def test_scrypt_derivation_runs_in_a_worker_thread(harness, monkeypatch):

@@ -46,7 +46,7 @@ EnvironmentFile=/etc/blockface-plus/api.env
 
 # systemd 不继承登录 shell 的 PATH（默认只有 /usr/bin:/bin），
 # 所以 uv 自带的环境变量要在这里显式给全，否则 uv 会去 $HOME/.cache 找缓存 ——
-# 而 ProtectHome=true 下 $HOME 根本读不到。
+# ProtectHome=read-only 保留 $HOME 可读；UV_CACHE_DIR 则把缓存写入声明的缓存目录。
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=UV_CACHE_DIR=/var/cache/blockface-plus
 # 别让 uv 反问任何东西：没有 tty，一旦它想交互就是「卡住直到超时」。
@@ -83,7 +83,7 @@ SyslogIdentifier=blockface-plus-api
 # ProtectSystem=strict 生效后，StateDirectory/CacheDirectory 那两条已经自动开了对应白名单，
 # 这里再显式列一次是给「改了 StateDirectory 名字却忘了改这里」的情况兜底。
 ProtectSystem=strict
-ProtectHome=true
+ProtectHome=read-only
 PrivateTmp=true
 NoNewPrivileges=true
 ProtectKernelTunables=true

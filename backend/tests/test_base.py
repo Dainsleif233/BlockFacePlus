@@ -304,6 +304,29 @@ async def test_multipart_spool_dir_lives_in_the_data_dir(open_harness, tmp_path)
         tempfile.tempdir = original
 
 
+async def test_upload_after_concurrent_room_delete_rolls_back_file(harness, monkeypatch):
+    room_id, _edit, admin = await harness.create_ok()
+
+    from bfp import base as base_module
+
+    real_commit = base_module.StagedBaseImage.commit
+
+    def delete_room_before_metadata_commit(staged, ext, *, cleanup=True):
+        import sqlite3
+
+        with sqlite3.connect(harness.settings.db_path) as connection:
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("DELETE FROM rooms WHERE room_id = ?", (room_id,))
+            connection.commit()
+        return real_commit(staged, ext, cleanup=cleanup)
+
+    monkeypatch.setattr(base_module.StagedBaseImage, "commit", delete_room_before_metadata_commit)
+    response = await harness.upload(room_id, admin, content=JPEG_BYTES)
+    assert response.status_code == 404
+    assert response.json()["error"] == "房间不存在或已被删除"
+    assert harness.base_files(room_id) == []
+
+
 async def test_failed_metadata_update_restores_previous_base(harness):
     room_id, _edit, admin = await harness.create_ok()
     assert (await harness.upload(room_id, admin, content=PNG_BYTES)).status_code == 200

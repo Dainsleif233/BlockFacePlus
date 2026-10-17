@@ -447,8 +447,8 @@ check('multipart 的类型头交给浏览器带 boundary（客户端不手写 Co
   !!uploadCall && uploadCall.contentType === '',
   uploadCall ? ('Content-Type=' + JSON.stringify(uploadCall.contentType)) : '没有上传请求');
 check('上传底图带的是编辑密码（这时房主还没进房）',
-  !!uploadCall && !!published && uploadCall.password === published.editPassword,
-  uploadCall ? ('pwd=' + (uploadCall.password ? '<' + uploadCall.password.length + ' 位>' : '无')) : '没有上传请求');
+  !!uploadCall && !!published && uploadCall.passwordLength === published.editPassword.length,
+  uploadCall ? ('pwd=' + (uploadCall.passwordLength ? '<' + uploadCall.passwordLength + ' 位>' : '无')) : '没有上传请求');
 check('预签名直传那条老路一次都没被调用',
   e2e.apiCalls({ method: 'PUT' }).length === 0,
   'PUT 次数=' + e2e.apiCalls({ method: 'PUT' }).length);

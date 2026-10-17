@@ -20,6 +20,7 @@ import logging
 import math
 import secrets
 import time
+import weakref
 from typing import Any
 
 from .config import Settings
@@ -40,6 +41,10 @@ __all__ = [
 ]
 
 log = logging.getLogger("bfp.security")
+
+# 一个 uvicorn worker 内，同一房间的 scrypt 校验串行化，避免并发错误尝试
+# 在失败计数落库前同时占满线程池。跨进程部署仍需外部限流。
+_AUTH_LOCKS: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
 # 去掉 0/1/l/o 这类肉眼易混的字符，抄写不出错
 PASSWORD_ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz"
@@ -168,6 +173,13 @@ async def check_password(
 
 
 async def authenticate(db: Database, settings: Settings, room: Any, password: str) -> str:
+    room_id = room["room_id"]
+    lock = _AUTH_LOCKS.setdefault(room_id, asyncio.Lock())
+    async with lock:
+        return await _authenticate_locked(db, settings, room, password)
+
+
+async def _authenticate_locked(db: Database, settings: Settings, room: Any, password: str) -> str:
     """鉴权 + 限流。密码错一律 401，房间不存在是 404（由 require_room 先抛），不泄漏更多细节。"""
     room_id = room["room_id"]
     now = now_ms()

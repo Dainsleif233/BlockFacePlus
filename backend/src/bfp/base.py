@@ -32,7 +32,7 @@ from starlette.datastructures import FormData, UploadFile
 # starlette 版本由 uv.lock 钉死，所以这个内部接口的形态是确定的。
 from starlette.formparsers import MultiPartException, MultiPartParser
 
-from .errors import ApiError, json_response, password_of
+from .errors import ApiError, ROOM_NOT_FOUND, json_response, password_of
 from .normalize import (
     ext_for_content_type,
     normalize_base_name,
@@ -184,11 +184,14 @@ async def upload_base(request: Request, room_id: str) -> JSONResponse:
         committed = True
         updated_at = now_ms()
         async with db.transaction() as conn:
-            await conn.execute(
+            cursor = await conn.execute(
                 "UPDATE room_base SET ext = ?, type = ?, name = ?, width = ?, height = ?, status = 'ready', "
                 "updated_at = ? WHERE room_id = ?",
                 (ext, content_type, name, width, height, updated_at, meta["room_id"]),
             )
+            if cursor.rowcount != 1:
+                # 房间可能在上传耗时期间被管理员删除；不能把新文件当成成功上传留下。
+                raise ApiError(404, ROOM_NOT_FOUND)
     except BaseException:
         staged.abort()
         await asyncio.to_thread(

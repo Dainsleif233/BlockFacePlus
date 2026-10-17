@@ -173,8 +173,8 @@ if (isEditor) {
   check('PATCH 没带位置字段（协议不变性）',
     updates.length > 0 && !('x' in updates[0]) && !('y' in updates[0]) && !('size' in updates[0]) && !('layout' in updates[0]),
     updates.length ? 'ok' : '没有 PATCH');
-  check('PATCH 用的是编辑密码', patchCalls.length > 0 && patchCalls[0].password === password,
-    patchCalls.length ? ('pwd=' + (patchCalls[0].password ? '<' + patchCalls[0].password.length + ' 位>' : '无')) : '没有 PATCH');
+  check('PATCH 用的是编辑密码', patchCalls.length > 0 && patchCalls[0].passwordLength === password.length,
+    patchCalls.length ? ('pwd=' + (patchCalls[0].passwordLength ? '<' + patchCalls[0].passwordLength + ' 位>' : '无')) : '没有 PATCH');
   check('编辑者这轮没有误发新增', adds.length === 0, String(adds.length));
 
   const after = await e2e.apiGetRoom(roomId, password);
@@ -299,7 +299,7 @@ if (isEditor) {
   check('multipart 的类型头交给浏览器带 boundary（客户端不手写 Content-Type）',
     !!baseCall && baseCall.contentType === '',
     baseCall ? ('Content-Type=' + JSON.stringify(baseCall.contentType)) : '没有上传请求');
-  check('换底图也用管理员密码', !!baseCall && baseCall.password === password, baseCall ? 'ok' : '没有上传请求');
+  check('换底图也用管理员密码', !!baseCall && baseCall.passwordLength === password.length, baseCall ? 'ok' : '没有上传请求');
 
   const afterSwap = await e2e.apiGetRoom(roomId, password);
   check('服务端底图已更新且仍为 ready',

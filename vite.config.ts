@@ -24,13 +24,12 @@ const buildEnv = (mode: string): Record<string, string> => ({
   ...loadEnv(mode, process.cwd(), 'VITE_'),
 })
 
-/** 只为 CSP 取个 origin；变量写错时宁可少加一条来源，也不要让构建挂在一句 URL 报错上 */
+/** 只为 CSP 取个 origin；变量写错时让构建直接失败，避免产物与 CSP 不一致 */
 function apiOrigin(value: string): string {
   try {
     return new URL(value).origin
   } catch {
-    console.warn('[blockface+] VITE_API_BASE_URL 不是合法 URL，CSP 里不加入该来源：' + value)
-    return ''
+    throw new Error('[blockface+] VITE_API_BASE_URL 不是合法 URL：' + value)
   }
 }
 
