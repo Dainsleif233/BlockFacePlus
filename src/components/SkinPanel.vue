@@ -13,6 +13,7 @@ import {
   splitBatchInput,
   useAccountSkins,
   useBuiltinSkin,
+  useMuaSkins,
   useExistingSkin,
   useImageFiles,
   useSkinFiles,
@@ -26,12 +27,14 @@ import SkinThumb from './SkinThumb.vue';
 const ORIGIN_COLOR: Record<SkinOrigin, string> = {
   builtin: 'var(--bf-grass)',
   account: 'var(--bf-gold)',
+  mua: 'var(--bf-gold)',
   upload: 'var(--bf-cyan)',
   url: 'var(--bf-red)',
   preset: 'var(--bf-ink)',
 };
 
 const accountId = ref('');
+const muaId = ref('');
 const urlInput = ref('');
 const skinInput = ref<HTMLInputElement | null>(null);
 const imageInput = ref<HTMLInputElement | null>(null);
@@ -39,6 +42,8 @@ const dropActive = ref(false);
 const imageDropActive = ref(false);
 const accountState = ref<'idle' | 'busy' | 'ok' | 'fail'>('idle');
 const accountText = ref('');
+const muaState = ref<'idle' | 'busy' | 'ok' | 'fail'>('idle');
+const muaText = ref('');
 
 const busy = computed(() => editor.busy !== null);
 
@@ -73,6 +78,21 @@ async function submitAccount(): Promise<void> {
   const result = await useAccountSkins(value);
   accountState.value = result.ok > 0 && result.failed.length === 0 ? 'ok' : 'fail';
   accountText.value = result.failed.length
+    ? `成功 ${result.ok} 个 · 失败 ${result.failed.length} 个`
+    : count > 1
+      ? `已添加 ${result.ok} 个头像`
+      : '已套用 ' + value;
+}
+
+async function submitMua(): Promise<void> {
+  const value = muaId.value.trim();
+  if (!value || busy.value) return;
+  const count = splitBatchInput(value).length;
+  muaState.value = 'busy';
+  muaText.value = count > 1 ? `查询 ${count} 个角色…` : '查询中…';
+  const result = await useMuaSkins(value);
+  muaState.value = result.ok > 0 && result.failed.length === 0 ? 'ok' : 'fail';
+  muaText.value = result.failed.length
     ? `成功 ${result.ok} 个 · 失败 ${result.failed.length} 个`
     : count > 1
       ? `已添加 ${result.ok} 个头像`
@@ -181,6 +201,38 @@ async function onImageDrop(event: DragEvent): Promise<void> {
         <div v-else-if="accountState !== 'idle'" class="qstat">
           <i class="bf-lamp" :class="accountState === 'ok' ? 'bf-lamp--ok' : 'bf-lamp--no'" aria-hidden="true" />
           <span>{{ accountText }}</span>
+        </div>
+      </section>
+
+      <section
+        class="bf-sblk bf-sblk--gold"
+        title="MUA 联合认证（mualliance.ltd）：按 ID 从 Union 皮肤站取图；该站不发跨域头，取图会走与「网络地址」同一套代理兜底"
+      >
+        <div
+          class="bf-sblk-t"
+          :title="'一次填多个 ID（空格、逗号或换行隔开）会各加一个头像，最多 ' + MAX_BATCH + ' 个'"
+        >
+          <h3>MUA 联合认证 ID</h3>
+          <span>{{ collabLocked ? '换到选中的头像' : '多个各加一个' }}</span>
+        </div>
+        <form class="bf-row" @submit.prevent="submitMua">
+          <input
+            v-model="muaId"
+            class="bf-inp"
+            type="text"
+            placeholder="UpSGE，可贴几个 ID"
+            aria-label="MUA 联合认证 ID"
+            :disabled="busy"
+          />
+          <button class="bf-btn bf-btn--sm bf-btn--ink" type="submit" :disabled="busy || !muaId.trim()">查询</button>
+        </form>
+        <div v-if="muaState === 'busy'" class="qstat">
+          <i class="qdot" aria-hidden="true" /><i class="qdot" aria-hidden="true" /><i class="qdot" aria-hidden="true" />
+          <span>{{ muaText }}</span>
+        </div>
+        <div v-else-if="muaState !== 'idle'" class="qstat">
+          <i class="bf-lamp" :class="muaState === 'ok' ? 'bf-lamp--ok' : 'bf-lamp--no'" aria-hidden="true" />
+          <span>{{ muaText }}</span>
         </div>
       </section>
 

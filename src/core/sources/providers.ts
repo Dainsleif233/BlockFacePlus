@@ -68,6 +68,25 @@ export function validateAccountName(name: string): string {
   return trimmed;
 }
 
+/** MUA 联合认证的皮肤地址在 skin.mualliance.ltd，这个名字会出现在素材来源与提示文案里 */
+export const MUA_PROVIDER = 'MUA 联合认证';
+
+/**
+ * MUA 联合认证的角色名。
+ *
+ * 复用 /^[A-Za-z0-9_]{3,16}$/：Union 里的角色名就是 Minecraft 角色名，与正版 ID 同一套规则。
+ * 挡的是"名字里塞进斜杠或问号、把上游路径拼歪"这类问题 ——
+ * 这个地址是直接拼进 URL 的，不做校验等于让输入框去决定请求打到哪。
+ */
+export function validateMuaName(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed) throw new SkinLookupError('请输入 MUA 联合认证 ID');
+  if (!NAME_PATTERN.test(trimmed)) {
+    throw new SkinLookupError('MUA 联合认证 ID 只能包含字母、数字与下划线，长度 3–16 位');
+  }
+  return trimmed;
+}
+
 interface PlayerDbPlayer {
   username?: string;
   skin_texture?: string;

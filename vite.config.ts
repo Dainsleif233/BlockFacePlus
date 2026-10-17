@@ -47,6 +47,9 @@ export default defineConfig(({ mode }) => {
    *
    * 资源来源说明：
    *  - textures/mc-heads/minotar 是皮肤贴图（<img> + canvas 绘制，需 crossOrigin）
+   *  - skin.mualliance.ltd 是 MUA 联合认证的皮肤源：**不发 CORS 头**，只能靠
+   *    images.weserv.nl 那级代理拿到可导出的像素；列进 img-src 是为了让
+   *    "代理也不可用"时还能退回非 CORS 加载（能看见，但导出前会提示）
    *  - playerdb.co 是正版 ID 查询接口（fetch）
    *  - VITE_API_BASE_URL 的 origin 是协同后端；同源部署（变量为空）时不需要它，
    *    跨域部署少了这一条，浏览器会把请求当作被 CSP 拦掉的脚本
@@ -62,7 +65,11 @@ export default defineConfig(({ mode }) => {
       // 跨域图片的代理兜底（editor.ts 的 DEFAULT_PROXY_TEMPLATE）。少了这一条，
       // 生产构建里第 2 级兜底会被 CSP 直接拦死，而 dev 不注入 CSP，本地永远复现不出来。
       // 换了代理模板，这里要跟着换。
-      " https://images.weserv.nl",
+      " https://images.weserv.nl" +
+      // MUA 联合认证（skin.mualliance.ltd）：它不发 Access-Control-Allow-Origin，
+      // 所以第 1 级 CORS 直取必然失败、实际靠上面那级代理取图；但第 3 级非 CORS 兜底
+      // 仍然要能加载它 —— 不写这一条，代理不可用时就只剩"什么都没发生"。
+      " https://skin.mualliance.ltd",
     "connect-src 'self'" + (apiCspOrigin ? ' ' + apiCspOrigin : '') + ' https://playerdb.co',
     "font-src 'self'",
     "object-src 'none'",

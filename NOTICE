@@ -26,6 +26,8 @@ This product is licensed under the Apache License, Version 2.0 (see LICENSE).
 - mc-heads.net         账号皮肤的回退来源
 - minotar.net          账号皮肤的回退来源
 - crafatar.com         皮肤直链（用户主动粘贴 URL 时）
+- skin.mualliance.ltd  MUA 联合认证 ID → 皮肤贴图（**不返回** CORS 头，
+                       因此该入口依赖下面的代理才能取到可导出的像素）
 - images.weserv.nl     仅在直连图片缺少 CORS 头时作为可选代理，默认不使用
 
 用户选择的所有图片都只在浏览器本地解码合成，不会上传到任何服务器。

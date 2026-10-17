@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   loadFirstAvailable,
+  MUA_PROVIDER,
   resolveAccountSkin,
   type SkinCandidate,
   SkinLookupError,
   validateAccountName,
+  validateMuaName,
 } from './providers';
 
 describe('validateAccountName', () => {
@@ -31,6 +33,29 @@ describe('validateAccountName', () => {
     expect(() => validateAccountName('史蒂夫')).toThrow(SkinLookupError);
     expect(() => validateAccountName('Notch!')).toThrow(SkinLookupError);
     expect(() => validateAccountName('hello world')).toThrow(SkinLookupError);
+  });
+});
+
+describe('validateMuaName', () => {
+  it('与正版 ID 同一套规则：字母、数字与下划线，3-16 位', () => {
+    expect(validateMuaName('UpSGE')).toBe('UpSGE');
+    expect(validateMuaName('  Dainsleif_233  ')).toBe('Dainsleif_233');
+  });
+
+  it('空输入报的是 MUA 的提示，不是正版账号的提示', () => {
+    expect(() => validateMuaName('')).toThrow('请输入 MUA 联合认证 ID');
+    expect(() => validateMuaName('   ')).toThrow(SkinLookupError);
+  });
+
+  it('拒绝会把上游路径拼歪的名字', () => {
+    expect(() => validateMuaName('../etc/passwd')).toThrow(SkinLookupError);
+    expect(() => validateMuaName('UpSGE?x=1')).toThrow(SkinLookupError);
+    expect(() => validateMuaName('UpSGE/extra')).toThrow(SkinLookupError);
+    expect(() => validateMuaName('ab')).toThrow(SkinLookupError);
+  });
+
+  it('来源标签是给人看的，不该是域名', () => {
+    expect(MUA_PROVIDER).toBe('MUA 联合认证');
   });
 });
 

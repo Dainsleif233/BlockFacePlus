@@ -83,7 +83,7 @@ export function describeSkin(width: number, height: number, forceFrontOnly?: boo
 }
 
 /** 皮肤的来源类型，用于界面归因与错误文案 */
-export type SkinOrigin = 'builtin' | 'account' | 'upload' | 'url' | 'preset';
+export type SkinOrigin = 'builtin' | 'account' | 'mua' | 'upload' | 'url' | 'preset';
 
 export interface SkinTexture {
   id: string;

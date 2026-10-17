@@ -22,8 +22,10 @@ import { loadImage, type LoadedImage } from '../core/sources/imageLoader';
 import {
   BUILTIN_SKINS,
   loadFirstAvailable,
+  MUA_PROVIDER,
   resolveAccountSkin,
   SkinLookupError,
+  validateMuaName,
   type SkinCandidate,
 } from '../core/sources/providers';
 import { assertUsableSkin, describeCustomImage, describeSkin, type SkinOrigin, type SkinTexture } from '../core/skin/texture';
@@ -735,6 +737,77 @@ export async function useAccountSkin(name: string): Promise<void> {
   } finally {
     state.busy = null;
   }
+}
+
+/**
+ * MUA 联合认证皮肤的上游地址。
+ *
+ * 和正版 ID 一样是**纯前端直连**：skin.mualliance.ltd 不返回 Access-Control-Allow-Origin，
+ * 所以真正的取图交给 loadImage 那套三级降级 —— 先按 CORS 直取，
+ * 不行就走用户配置的跨域代理（默认 images.weserv.nl，与「网络地址」入口完全同一套），
+ * 再不行退回非 CORS 加载（能看见，但画布被污染、导出前会提示）。
+ * 这里不另造一条取图路径：多一条路径就多一份"两边行为不一致"的债。
+ */
+export function muaSkinUrl(name: string): string {
+  return 'https://skin.mualliance.ltd/api/union/skin/byname/' + encodeURIComponent(name);
+}
+
+async function loadMuaSkin(name: string): Promise<{ loaded: LoadedImage; provider: string; label: string }> {
+  const clean = validateMuaName(name);
+  let loaded: LoadedImage;
+  try {
+    loaded = await loadImage(muaSkinUrl(clean), { proxyTemplate: state.proxyTemplate });
+  } catch {
+    // 上游用 404 表示"Union 里没这个 ID"，500 表示"这个角色所属的成员皮肤站自己挂了"。
+    // 走 <img> 加载时两种都只是 onerror，前端分不出来 —— 所以不臆断成"名字不存在"，
+    // 把两种可能都摆出来，用户才知道该改名字还是该等一会儿再试。
+    throw new SkinLookupError(
+      `没取到 MUA 联合认证「${clean}」的皮肤：Union 里没有这个 ID，或它所属的皮肤站暂时不可用`,
+    );
+  }
+  return { loaded: requireSkin(loaded), provider: MUA_PROVIDER, label: clean };
+}
+
+export async function useMuaSkin(name: string): Promise<void> {
+  state.busy = `查询 ${name}`;
+  try {
+    const { loaded, label } = await loadMuaSkin(name);
+    const skinId = createId('skin');
+    registerSkin(loaded, 'mua', label, MUA_PROVIDER, skinId);
+    applySkin(skinId);
+    notify(
+      loaded.tainted ? 'warn' : 'success',
+      loaded.tainted
+        ? `已加载 MUA 联合认证「${label}」的皮肤，但该来源未开启 CORS 且代理不可用，导出可能失败`
+        : `已加载 MUA 联合认证「${label}」的皮肤`,
+    );
+  } catch (error) {
+    notify('error', (error as Error).message);
+  } finally {
+    state.busy = null;
+  }
+}
+
+/** MUA 联合认证 ID：一个走老路，多个各新增一个（与正版账号 ID 的批量口径一致） */
+export async function useMuaSkins(text: string): Promise<BatchResult> {
+  const names = splitBatchInput(text);
+  if (names.length === 0) {
+    notify('error', '请输入 MUA 联合认证 ID');
+    return { ok: 0, failed: [] };
+  }
+  if (names.length === 1) {
+    const before = state.skins.length;
+    await useMuaSkin(names[0]);
+    return state.skins.length > before ? { ok: 1, failed: [] } : { ok: 0, failed: [names[0]] };
+  }
+  return batchAdd(
+    names.map((name): BatchItem => ({
+      label: name,
+      origin: 'mua',
+      load: () => loadMuaSkin(name),
+    })),
+    '查询 MUA',
+  );
 }
 
 function isSkinFile(file: File): boolean {
