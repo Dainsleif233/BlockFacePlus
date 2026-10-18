@@ -548,6 +548,22 @@ journalctl -u blockface-plus-api -n 50 --no-pager
 **升级前先做一次 7.1 的备份**：数据库结构由后端在启动时按 `backend/src/bfp/schema.sql` 初始化，
 结构一旦变了，旧版本代码通常读不回新库（结构变更不可逆）。备份是唯一可靠的退路。
 
+**表结构的增量迁移是自动的，不需要手工执行 SQL。** 启动时 `bfp/db.py` 会先跑
+`schema.sql`（`CREATE TABLE IF NOT EXISTS`，只对全新的库生效），再走
+`_migrate()`：它按 `_ADDED_COLUMNS` 里声明的补列清单查 `PRAGMA table_info`，
+缺哪列就 `ALTER TABLE ... ADD COLUMN`，整段包在 `BEGIN IMMEDIATE` 里，
+所以服务和 `bfp-ops` 同时启动也不会互相踩。
+本次加预览图用的 `preview_ext` / `preview_type` / `preview_width` / `preview_height`
+四列就是这样补上的，`systemctl restart` 完就有了。
+
+启动失败时的典型症状与对策：
+
+| journalctl 里的报错 | 原因 | 怎么办 |
+| --- | --- | --- |
+| `duplicate column name: preview_ext` | 两个进程同时迁移（旧代码没有加锁） | 升级到当前版本即可；单次可先 `systemctl stop` 再重启 |
+| `database is locked` | 有别的东西正占着库（`bfp-ops`、或上一轮没退干净的服务） | 已内置 5 秒重试；持续出现就 `ps aux \| grep bfp` 找出占用者 |
+| 服务起不来、进程还挂着不退出 | 初始化中途失败但连接没关（旧代码） | 同样是升级到当前版本；旧版本只能 `systemctl kill` |
+
 ---
 
 ## 8. 排错
