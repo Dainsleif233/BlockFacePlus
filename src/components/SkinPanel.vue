@@ -66,8 +66,8 @@ async function retryTainted(): Promise<void> {
   notify(
     fixed > 0 ? 'success' : 'warn',
     fixed > 0
-      ? `已重取 ${fixed} 张皮肤，现在存得下来了`
-      : '重取还是没成功：把这几张皮肤图片下载到本地，用「上传皮肤」导入',
+      ? `已重取 ${fixed} 张皮肤`
+      : '重取失败，请改用本地「上传皮肤」',
   );
 }
 
@@ -338,7 +338,7 @@ async function onImageDrop(event: DragEvent): Promise<void> {
               type="button"
               class="bf-btn bf-btn--sm bf-btn--quiet skin-clean-btn"
               :disabled="busy"
-              :title="taintedCount + ' 张素材可能存不下来：它们来自不允许本程序读取内容的网站。点这里重新取一遍，多半是刚才取图临时失败'"
+              :title="taintedCount + ' 张素材受限，点此重试'"
               @click="retryTainted"
             >
               重取 {{ taintedCount }}
@@ -369,7 +369,7 @@ async function onImageDrop(event: DragEvent): Promise<void> {
               </span>
               <span class="bf-lay-n">{{ record.sourceLabel }}</span>
               <span class="bf-lay-m">{{ record.meta.label }}</span>
-              <i v-if="record.tainted" class="row__warn" title="这张皮肤可能存不下来：来源网站不允许本程序读取图片内容。点上方「重取」再试，或改用「上传皮肤」" aria-hidden="true">!</i>
+              <i v-if="record.tainted" class="row__warn" title="受限素材，若保存失败请点上方「重取」或本地上传" aria-hidden="true">!</i>
             </button>
             <button
               v-if="record.origin !== 'builtin'"

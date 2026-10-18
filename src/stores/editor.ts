@@ -780,7 +780,7 @@ export async function useMuaSkin(name: string): Promise<void> {
     notify(
       loaded.tainted ? 'warn' : 'success',
       loaded.tainted
-        ? `已加载 MUA 联合认证「${label}」的皮肤，但这个网站不允许本程序读取图片内容，可能存不下来。点素材列表里的「重取」再试一次`
+        ? `已加载「${label}」（若保存受限请点「重取」或改用本地上传）`
         : `已加载 MUA 联合认证「${label}」的皮肤`,
     );
   } catch (error) {
@@ -884,7 +884,7 @@ export async function useSkinUrl(rawUrl: string): Promise<void> {
     notify(
       loaded.tainted ? 'warn' : 'success',
       loaded.tainted
-        ? '皮肤已载入，但这个网站不允许本程序读取图片内容，可能存不下来。点素材列表里的「重取」再试一次'
+        ? '皮肤已载入（若保存受限请点「重取」或改用本地上传）'
         : '皮肤已载入',
     );
   } catch (error) {
@@ -1449,8 +1449,8 @@ export function describeEncodeFailure(
     .join('、');
   const anyTainted = failed.some((item) => item.tainted);
   return anyTainted
-    ? `${names}用的皮肤是从别的网站直接取来的，那个网站不允许本程序读取图片内容，所以这张皮肤存不下来。先点「重取」再试一次（多半是刚才取图临时失败）；还是不行，就把皮肤图片下载到本地，用「上传皮肤」导入。`
-    : `${names}的皮肤图片读不出来。把这张皮肤下载到本地，用「上传皮肤」重新导入后再试。`;
+    ? `${names}皮肤受限无法保存：请点「重取」或改用本地「上传皮肤」`
+    : `${names}皮肤读取失败：请改用本地「上传皮肤」`;
 }
 
 /**

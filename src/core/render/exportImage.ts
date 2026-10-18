@@ -29,7 +29,7 @@ export function canvasToBlob(canvas: HTMLCanvasElement, type = 'image/png', qual
       // 图片来自别的网站、对方不允许读取像素时，浏览器在这里抛 SecurityError
       reject(
         new Error(
-          '导出失败：画布里有从别的网站直接取来的图片，那个网站不允许本程序读取图片内容。把这张图下载到本地，用「上传皮肤」导入后再导出。',
+          '导出失败：部分皮肤受限无法读取，请改用本地「上传皮肤」',
           { cause: error },
         ),
       );
