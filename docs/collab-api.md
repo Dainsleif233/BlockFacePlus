@@ -86,28 +86,73 @@
 
 ```jsonc
 {
-  "updates": [{ "id": "l1", "layout": { "x": 10 }, "skin": { /* PresetSkin */ },
-                "expectLayoutUpdatedAt": 1760000000000, "expectSkinUpdatedAt": 1760000000000 }],
+  "updates": [{ "id": "l1", "layout": { "x": 10 }, "appearance": { "flipH": true },
+                "skin": { /* PresetSkin */ },
+                "expectLayoutUpdatedAt": 1760000000000,
+                "expectAppearanceUpdatedAt": 1760000000000,
+                "expectSkinUpdatedAt": 1760000000000 }],
   "adds":    [ /* RoomAvatarDraft 全量一行 */ ],
   "deletes": ["l2"]
 }
 ```
 
-响应 `200`：`{ "results": [{ "id": "l1", "ok": true, "skinUpdatedAt": 1, "layoutUpdatedAt": 1 }] }`
+响应 `200`：
+`{ "results": [{ "id": "l1", "ok": true, "skinUpdatedAt": 1, "layoutUpdatedAt": 1, "appearanceUpdatedAt": 1 }] }`
 
 三条铁律（与旧实现一致）：
 1. 只写请求里真的提到的行；
-2. 行内按字段域写：`layout` 补丁只覆盖布局字段，`skin` 只覆盖皮肤字段，两个版本戳各管各的；
+2. 行内按字段域写：`layout` 补丁只覆盖布局字段，`appearance` 只覆盖帽子层与水平翻转，
+   `skin` 只覆盖皮肤字段；三个版本戳各管各的；
 3. 缺的键不动（不是用默认值补齐）。
 
-角色约束：编辑者只能 `updates[].skin`；带 `layout` 一律忽略（不报错），带 `adds`/`deletes` 返回 403。
-单条结果 `error` 取值：`invalid | invalid-layout | invalid-skin | not-found | exists | conflict`。
+角色约束：编辑者能写 `updates[].skin` 与 `updates[].appearance`；
+带 `layout` 一律忽略（不报错），带 `adds`/`deletes` 返回 403。管理员三者皆可。
+单条结果 `error` 取值：`invalid | invalid-layout | invalid-appearance | invalid-skin | not-found | exists | conflict`。
 
 `adds` 还会被**房间总行数**挡一道：房间当前行数 − 本次真实删除的行数 + 本次 `adds` 条数
 超过 `BF_MAX_LAYERS` 时整批 `400`（响应体是
 `{"error": "这间房已经有 N 个头像，再加 M 个会超过一间房的上限（512）：先删几个再试"}`），
 同一批里的 `updates` / `deletes` 一并回滚。上限是按房间算的，不是按请求算的 —— 单次请求的条数上限
 只是"一次别让我处理太多"，换个口径就等于没有上限。删一个**不存在**的 id 只是幂等成功，不腾位置。
+
+### 2.4.1 版本戳按域拆分（向后兼容）
+
+一个头像行有三类字段，各自带一列版本戳：`layout_updated_at`（`name, x, y, size, rotation,
+opacity, visible, order`）、`appearance_updated_at`（`overlay, flipH`）、`skin_updated_at`。
+拆分的原因是它们由不同角色写：布局只归管理员，帽子层 / 水平翻转与皮肤归管理员与编辑者。
+三者共用一个戳时，编辑者换一次皮肤就会被判成「整行都变了」，管理员手上的 `expectLayoutUpdatedAt`
+随即作废，冲突与冻结搅在一起，谁都不敢改。
+
+对既有部署和既有客户端，这次变更是加法：
+
+- **旧房间行**：迁移时 `appearance_updated_at` 补 `0`，`GET` 响应一律带 `appearanceUpdatedAt`
+  （`0` 表示这一列从未推进过）。拿它当 `expectAppearanceUpdatedAt` 直接可用，不需要先读一次。
+- **旧客户端把 `overlay` / `flipH` 塞在 `layout` 里**：仍然生效，服务端会把这两个键从布局
+  补丁里摘出来、按外观域落库，推进的是 `appearance_updated_at`，`layout_updated_at` 不动。
+  也就是说，老前端的行为看起来没变（改得动、存得住），只是不再让布局戳替外观背锅。
+- **编辑者带 `layout`**：整条忽略（不报错），其中的 `overlay` / `flipH` 一并不生效 ——
+  与拆分前的行为完全一致，不因为这次拆分额外放开任何东西。
+- **一条 `update` 三域都没带**：空操作，不写盘、不推戳。
+- 请求里的 `skin` 仍只认 `skin_updated_at`，这一列的语义没有变过。
+
+新前端只在 `GET` 快照里看到 `appearanceUpdatedAt`（值为 `0` 也算看到）时才走新协议；
+只要有一行缺这个键，就认定后端还不认识外观域。发布是前后端分开走的（前端在 Pages、后端在 VPS），
+中间必然有一段一新一旧的窗口，这时的处理按角色分两条路：
+
+- **编辑者**：属性栏里的帽子层 / 水平翻转开关整块不出现。点了也没用，不如直说 ——
+  与拆分前的「编辑者只能换皮肤」完全一样。
+- **管理员**：外观差量并进 `layout` 发出去，并发凭证退回 `expectLayoutUpdatedAt`。老后端本来就
+  在布局里认这两个键（就是上面那条兼容条款的反向用法），所以翻转存得住，推进的是 `layout_updated_at`。
+  少了这一条，这个窗口里管理员点翻转会被静默丢掉，界面还回一句「已保存」，
+  等于新前端比老前端还能得少。
+
+两条路都只发老后端认识的形状，所以不需要探测后端版本号：读到键就走新协议，读不到就整体退回旧口径。
+
+进房时判不出来的一种情况是**空房间**：快照里一行头像都没有，只能先按「认识外观域」处理。
+这时一旦真发出去一次外观差量、回执里却没有 `appearanceUpdatedAt`，前端当场降级为旧口径：
+那一条的外观留在待提交里、提示里明说这次没存上，下一次提交自动改用上表里的写法。
+反过来，如果这一批全被拒（冲突 / 非法），不做降级判断 —— 什么都没落库，那是另一类问题，
+据此认定后端老旧会把新后端误判成老后端。
 
 ### 2.5 `POST /api/rooms/{roomId}/base` — 上传 / 更换底图
 
@@ -206,11 +251,12 @@
 ### RoomAvatarRecord
 ```ts
 { id, name, x, y, size, rotation, opacity, overlay, flipH, visible, order,
-  skin: PresetSkin | null, skinUpdatedAt: number, layoutUpdatedAt: number }
+  skin: PresetSkin | null,
+  skinUpdatedAt: number, layoutUpdatedAt: number, appearanceUpdatedAt: number }
 ```
 
 ### RoomAvatarDraft
-`RoomAvatarRecord` 去掉 `skinUpdatedAt` / `layoutUpdatedAt`（版本戳由服务端生成）。
+`RoomAvatarRecord` 去掉 `skinUpdatedAt` / `layoutUpdatedAt` / `appearanceUpdatedAt`（版本戳由服务端生成）。
 
 ### PresetSkin
 ```ts
@@ -219,7 +265,11 @@
 ```
 
 ### LayoutPatch
-可选键：`name, x, y, size, rotation, opacity, overlay, flipH, visible, order`。没带的键服务端一律不动。
+可选键：`name, x, y, size, rotation, opacity, visible, order`。没带的键服务端一律不动。
+服务端仍接受 `overlay` / `flipH` 出现在这里（§2.4.1 的兼容别名），但会把它们归到外观域。
+
+### AppearancePatch
+可选键：`overlay, flipH`。没带的键不动；一条 `update` 只带 `appearance` 时，布局与皮肤都不写。
 
 ## 4. 上限（默认值，除过期档位外都可用环境变量覆盖）
 

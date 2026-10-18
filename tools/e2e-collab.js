@@ -5,7 +5,7 @@
  * 由 tools/run-e2e.mjs 用 cdp.mjs 分别驱动。阶段由查询参数 ?bfstage= 决定，
  * 凭据由 run-e2e.mjs 写一段临时脚本、经 cdp.mjs 的 --pre-file 注入 sessionStorage：
  *   - ?bfstage=editor + { roomId, password: 编辑密码, adminPassword }
- *       编辑者：布局冻结，只能换肤，差量提交 + 冲突回合
+ *       编辑者：布局冻结，可换肤 / 切帽子层 / 水平翻转，差量提交 + 冲突回合
  *   - ?bfstage=admin + { roomId, password: 管理员密码, adminPassword }
  *       管理员：挪位置 / 新增 / 换底图，删除房间
  *
@@ -86,9 +86,36 @@ const editorStore = await import('/src/stores/editor.ts');
 // 与 tools/e2e.js 相同的约定：main.ts 在 DEV 下把 store 挂到了 window
 const editor = window.__blockface.editor;
 
-/** 行内的版本戳与布局字段拼成一条可比较的指纹 */
+/** 行内的三个版本戳拼成一条可比较的指纹（任何一个域被动过都会变） */
 function stampsOf(snapshot) {
-  return (snapshot.avatars || []).map((a) => a.id + ':' + a.skinUpdatedAt + ':' + a.layoutUpdatedAt).sort().join('|');
+  return (snapshot.avatars || [])
+    .map((a) => a.id + ':' + a.skinUpdatedAt + ':' + a.layoutUpdatedAt + ':' + a.appearanceUpdatedAt)
+    .sort()
+    .join('|');
+}
+
+/**
+ * 找属性栏里的外观开关。按钮是 <button class="bf-tg" role="switch">，
+ * 文案在里面的 .bf-tg-t 上 —— 只按文本找，别依赖按钮的先后顺序。
+ */
+function appearanceSwitch(label) {
+  const buttons = Array.from(document.querySelectorAll('.rail--r .bf-tg'));
+  return buttons.find((el) => {
+    const text = el.querySelector('.bf-tg-t');
+    return !!text && text.textContent.trim() === label;
+  }) || null;
+}
+
+/**
+ * 点一下那个开关。找不到、或者它是 disabled 就不点：
+ * 图片型头像没有第二层，帽子层按钮是禁用的，而直接 dispatchEvent 仍会触发监听 ——
+ * 那样等于绕过界面把状态改了，检查就成了自己骗自己。
+ */
+function clickAppearanceSwitch(label) {
+  const target = appearanceSwitch(label);
+  if (!target || target.disabled) return false;
+  target.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  return true;
 }
 
 await sleep(600);
@@ -192,6 +219,123 @@ if (isEditor) {
     storedSecond ? (storedSecond.skinUpdatedAt + ':' + storedSecond.layoutUpdatedAt) : '只有一行');
   check('全量覆盖那条老路一次都没被调用', e2e.apiCalls({ method: 'PUT' }).length === 0,
     'PUT 次数=' + e2e.apiCalls({ method: 'PUT' }).length);
+
+  // —— 外观域：编辑者同样能切帽子层 / 水平翻转，走的是同一条差量提交，但只带外观戳 ——
+  check('这台后端认识外观域（快照里每行都带 appearanceUpdatedAt）',
+    entryAvatars.every((a) => typeof a.appearanceUpdatedAt === 'number')
+      && collabStore.appearanceLocked.value === false,
+    JSON.stringify({
+      appearanceLocked: collabStore.appearanceLocked.value,
+      stamps: entryAvatars.map((a) => a.appearanceUpdatedAt),
+    }));
+
+  const appearanceStampBefore = stored ? stored.appearanceUpdatedAt : 0;
+  const skinStampAfterSkin = stored ? stored.skinUpdatedAt : skinStampBefore;
+  const flipBefore = first.flipH;
+  // editor.notice 是全局单例，5.6 秒后自动清掉；上面"挪位置被拒""新增被拒"留下的 warn
+  // 到这一步可能还没过期。只看点完之后有没有"新"的 warn —— 按 notice.at 比时间戳，
+  // 否则这条会失败在一个跟翻转毫无关系的原因上。
+  const noticeStampBefore = editor.notice ? editor.notice.at : 0;
+  const clickedFlip = clickAppearanceSwitch('水平翻转');
+  await sleep(300);
+  const freshWarn = !!editor.notice && editor.notice.tone === 'warn' && editor.notice.at > noticeStampBefore;
+  check('编辑者点「水平翻转」没有被布局闸口拦下',
+    clickedFlip && first.flipH === !flipBefore && !freshWarn,
+    JSON.stringify({ clicked: clickedFlip, flip: first.flipH, freshWarn, notice: editor.notice && editor.notice.message }));
+  check('翻转计入待提交', collabStore.dirtyCount.value === 1, String(collabStore.dirtyCount.value));
+
+  e2e.resetApiCalls();
+  await collabStore.submitChanges();
+  await sleep(2000);
+  check('外观提交后待提交清零', collabStore.dirtyCount.value === 0, String(collabStore.dirtyCount.value));
+
+  const appearanceUpdates = e2e.apiCalls({ method: 'PATCH', pathEndsWith: '/avatars' })
+    .flatMap((c) => (c.body && c.body.updates) || []);
+  check('PATCH 只带外观差量与外观凭证（不夹带布局）',
+    appearanceUpdates.length === 1
+      && appearanceUpdates[0].id === first.id
+      && !!appearanceUpdates[0].appearance
+      && appearanceUpdates[0].appearance.flipH === !flipBefore
+      && typeof appearanceUpdates[0].expectAppearanceUpdatedAt === 'number'
+      && appearanceUpdates[0].layout === undefined
+      && !('x' in appearanceUpdates[0]) && !('skin' in appearanceUpdates[0]),
+    appearanceUpdates.length ? Object.keys(appearanceUpdates[0]).join(',') : '没有 PATCH');
+
+  const afterFlip = await e2e.apiGetRoom(roomId, password);
+  const flipped = e2e.avatarOf(afterFlip.data, first.id);
+  check('服务端翻转已落库，外观戳前进',
+    !!flipped && flipped.flipH === !flipBefore && flipped.appearanceUpdatedAt > appearanceStampBefore,
+    flipped ? (flipped.flipH + ' / ' + flipped.appearanceUpdatedAt + ' > ' + appearanceStampBefore) : '读不到这一行');
+  check('翻转没有推进布局戳，也没再动皮肤戳',
+    !!flipped && flipped.layoutUpdatedAt === layoutStampBefore && flipped.skinUpdatedAt === skinStampAfterSkin,
+    flipped ? (flipped.layoutUpdatedAt + ' / ' + flipped.skinUpdatedAt) : '');
+
+  // —— 帽子层：外观域的另一个键，与翻转对称地再走一遍 ——
+  // 这一行的皮肤是刚上传的 64×32 双层贴图（不是图片型头像），第二层存在；
+  // 图片型头像的帽子层按钮是禁用的，点它等于绕过界面，所以先确认按钮可用。
+  const capSwitch = appearanceSwitch('帽子层');
+  check('第一行是标准双层皮肤（不是图片型头像），帽子层开关可用',
+    !!capSwitch && !capSwitch.disabled,
+    capSwitch ? ('disabled=' + capSwitch.disabled) : '属性栏里找不到帽子层开关');
+
+  const overlayBefore = first.overlay;
+  const noticeStampBeforeOverlay = editor.notice ? editor.notice.at : 0;
+  const clickedOverlay = clickAppearanceSwitch('帽子层');
+  await sleep(300);
+  const overlayWarn = !!editor.notice && editor.notice.tone === 'warn' && editor.notice.at > noticeStampBeforeOverlay;
+  check('编辑者点「帽子层」也没有被布局闸口拦下',
+    clickedOverlay && first.overlay === !overlayBefore && !overlayWarn,
+    JSON.stringify({ clicked: clickedOverlay, overlay: first.overlay, overlayWarn, notice: editor.notice && editor.notice.message }));
+  check('帽子层计入待提交', collabStore.dirtyCount.value === 1, String(collabStore.dirtyCount.value));
+
+  e2e.resetApiCalls();
+  await collabStore.submitChanges();
+  await sleep(2000);
+  check('帽子层提交后待提交清零', collabStore.dirtyCount.value === 0, String(collabStore.dirtyCount.value));
+
+  const overlayUpdates = e2e.apiCalls({ method: 'PATCH', pathEndsWith: '/avatars' })
+    .flatMap((c) => (c.body && c.body.updates) || []);
+  check('PATCH 只带帽子层差量与外观凭证（不夹带布局）',
+    overlayUpdates.length === 1
+      && overlayUpdates[0].id === first.id
+      && !!overlayUpdates[0].appearance
+      && overlayUpdates[0].appearance.overlay === !overlayBefore
+      && typeof overlayUpdates[0].expectAppearanceUpdatedAt === 'number'
+      && overlayUpdates[0].layout === undefined
+      && !('x' in overlayUpdates[0]) && !('y' in overlayUpdates[0]) && !('skin' in overlayUpdates[0]),
+    overlayUpdates.length ? Object.keys(overlayUpdates[0]).join(',') : '没有 PATCH');
+
+  const afterOverlay = await e2e.apiGetRoom(roomId, password);
+  const withOverlay = e2e.avatarOf(afterOverlay.data, first.id);
+  const appearanceStampAfterFlip = flipped ? flipped.appearanceUpdatedAt : appearanceStampBefore;
+  check('服务端帽子层已落库，外观戳再次前进',
+    !!withOverlay && withOverlay.overlay === !overlayBefore && withOverlay.appearanceUpdatedAt > appearanceStampAfterFlip,
+    withOverlay
+      ? (withOverlay.overlay + ' / ' + withOverlay.appearanceUpdatedAt + ' > ' + appearanceStampAfterFlip)
+      : '读不到这一行');
+  check('帽子层同样没有推进布局戳，也没动皮肤戳',
+    !!withOverlay && withOverlay.layoutUpdatedAt === layoutStampBefore && withOverlay.skinUpdatedAt === skinStampAfterSkin,
+    withOverlay ? (withOverlay.layoutUpdatedAt + ' / ' + withOverlay.skinUpdatedAt) : '');
+
+  // —— 兼容回合：编辑者把 overlay/flipH 塞在 layout 里，与旧客户端的写法一致，整条忽略 ——
+  // 基线换成紧邻的这次读回（帽子层回合之后的 withOverlay）：这条要证明的是"这一发被忽略、
+  // 什么都没动"，与起点取哪一版无关；继续用翻转回合那份反而会把帽子层的改动算成它动了。
+  const ignored = await e2e.apiPatchAvatars(roomId, password, {
+    updates: [{ id: first.id, layout: { overlay: !(withOverlay && withOverlay.overlay), x: 999 } }],
+  });
+  const ignoredResult = ignored.data && ignored.data.results ? ignored.data.results[0] : null;
+  check('编辑者带 layout 不报错（照旧静默忽略）',
+    ignored.status === 200 && !!ignoredResult && ignoredResult.ok === true,
+    'HTTP ' + ignored.status + ' / ' + JSON.stringify(ignored.data));
+  const afterIgnored = await e2e.apiGetRoom(roomId, password);
+  const untouchedAppearance = e2e.avatarOf(afterIgnored.data, first.id);
+  check('编辑者 layout 里的 overlay/flipH 一并不生效，外观戳也没动',
+    !!withOverlay && !!untouchedAppearance && untouchedAppearance.overlay === withOverlay.overlay
+      && untouchedAppearance.x === withOverlay.x
+      && untouchedAppearance.appearanceUpdatedAt === withOverlay.appearanceUpdatedAt,
+    untouchedAppearance
+      ? (untouchedAppearance.overlay + ' / x=' + untouchedAppearance.x + ' / ' + untouchedAppearance.appearanceUpdatedAt)
+      : '读不到这一行');
 
   // —— 冲突回合：用管理员密码从"另一个客户端"改同一行，编辑者手里的版本戳随即过期 ——
   const injected = await e2e.apiPatchAvatars(roomId, adminPassword, {
@@ -313,6 +457,32 @@ if (isEditor) {
     'PATCH 次数=' + e2e.apiCalls({ method: 'PATCH', pathEndsWith: '/avatars' }).length);
   check('换底图也没走全量覆盖那条路', e2e.apiCalls({ method: 'PUT' }).length === 0,
     'PUT 次数=' + e2e.apiCalls({ method: 'PUT' }).length);
+
+  // —— 旧客户端的写法：管理员把 overlay 塞在 layout 里，仍要生效，但推进的是外观戳 ——
+  const beforeLegacy = await e2e.apiGetRoom(roomId, password);
+  const legacyRow = e2e.avatarOf(beforeLegacy.data, first.id);
+  const legacy = await e2e.apiPatchAvatars(roomId, password, {
+    updates: [{
+      id: first.id,
+      layout: { overlay: !(legacyRow && legacyRow.overlay) },
+      expectLayoutUpdatedAt: legacyRow ? legacyRow.layoutUpdatedAt : undefined,
+    }],
+  });
+  const legacyResult = legacy.data && legacy.data.results ? legacy.data.results[0] : null;
+  check('管理员把 overlay 塞在 layout 里仍然受理（旧客户端兼容）',
+    legacy.status === 200 && !!legacyResult && legacyResult.ok === true,
+    'HTTP ' + legacy.status + ' / ' + JSON.stringify(legacy.data));
+  const afterLegacy = await e2e.apiGetRoom(roomId, password);
+  const legacyAfter = e2e.avatarOf(afterLegacy.data, first.id);
+  check('兼容写法改了帽子层，推进的却是外观戳',
+    !!legacyRow && !!legacyAfter
+      && legacyAfter.overlay === !legacyRow.overlay
+      && legacyAfter.appearanceUpdatedAt > legacyRow.appearanceUpdatedAt
+      && legacyAfter.layoutUpdatedAt === legacyRow.layoutUpdatedAt,
+    legacyAfter
+      ? ('overlay ' + legacyAfter.overlay + ' / 外观 ' + legacyAfter.appearanceUpdatedAt + ' / 布局 '
+        + legacyAfter.layoutUpdatedAt + '（原本 ' + (legacyRow ? legacyRow.layoutUpdatedAt : '-') + '）')
+      : '读不到这一行');
 
   // —— 删除房间 ——
   await collabStore.removeRoom();

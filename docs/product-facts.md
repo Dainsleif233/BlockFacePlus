@@ -129,7 +129,7 @@ view.y = view.y + offset.y * (1 - k) + (size.height * (k - 1)) / 2;
 | :-- | :-- | :-- |
 | `rooms` | 房间身份：房间号、创建与过期时间、两把密码的 scrypt 哈希与长度 | 只在建房时写一次，此后没有任何代码路径再写它 |
 | `room_base` | 底图指针（后缀 / 类型 / 名字）+ 画布尺寸 + 状态 `draft` / `ready` | 只有上传底图这条路 |
-| `avatars` | 一个头像一行，联合主键 `(room_id, id)`；布局字段与皮肤字段（`skin_json` 存整份 `PresetSkin` 的 JSON 原文，`NULL` = 这一行没有皮肤）各有各的版本戳 `layout_updated_at` / `skin_updated_at` | 只有差量提交这条路，且只写被提到的行与字段 |
+| `avatars` | 一个头像一行，联合主键 `(room_id, id)`；布局字段、外观字段（`overlay` / `flipH`）与皮肤字段（`skin_json` 存整份 `PresetSkin` 的 JSON 原文，`NULL` = 这一行没有皮肤）各有各的版本戳 `layout_updated_at` / `appearance_updated_at` / `skin_updated_at` | 只有差量提交这条路，且只写被提到的行与字段 |
 | `room_throttle` | 密码试错限流：窗口起点、失败次数、锁定到期时刻 | 只在鉴权失败时 |
 
 - 三个索引各对应一条访问路径：`idx_rooms_expires_at(expires_at)` 与 `idx_room_base_status(status)` 给清扫用（按过期时间捞房间、按状态捞草稿房），`idx_avatars_order(room_id, order_index)` 给进房用（按 `order` 升序取整间房的头像行）。注意落库列名是 `order_index` —— `order` 是 SQL 关键字，对外（JSON 与前端类型）仍然是 `order`，写运维 SQL 时别找错列。
@@ -137,18 +137,19 @@ view.y = view.y + offset.y * (1 - k) + (size.height * (k - 1)) / 2;
 - 上限不再由平台决定：旧版受云函数请求体 6MiB 与挂钟 120 秒的硬限，现在只剩磁盘，以及你愿意在反向代理（nginx / Caddy）上放开多大的请求体（默认值见 4.7）。
 
 ### 4.2 头像记录与内嵌皮肤格式
-- 单条头像记录（`RoomAvatarRecord`）：`id / name / x / y / size / rotation / opacity / overlay / flipH / visible / order / skin / skinUpdatedAt / layoutUpdatedAt`。`order` 决定图层顺序（0 在最底层）；两个版本戳都是服务端生成的并发凭证，**各管各的域**：换皮肤只比对 `skinUpdatedAt`，挪位置只比对 `layoutUpdatedAt`。
+- 单条头像记录（`RoomAvatarRecord`）：`id / name / x / y / size / rotation / opacity / overlay / flipH / visible / order / skin / skinUpdatedAt / layoutUpdatedAt / appearanceUpdatedAt`。`order` 决定图层顺序（0 在最底层）；三个版本戳都是服务端生成的并发凭证，**各管各的域**：换皮肤只比对 `skinUpdatedAt`，挪位置只比对 `layoutUpdatedAt`，开关帽子层与水平翻转只比对 `appearanceUpdatedAt`。
+- **为什么外观要单占一列戳**：`overlay` / `flipH` 早先跟着布局走。布局只归管理员，外观与皮肤一样编辑者也能改 —— 共用一个戳的话，编辑者换一次皮肤就会把管理员手上的布局凭证顶掉，或者反过来让编辑者连帽子层都动不了。拆开的成本只有一列 `INTEGER NOT NULL DEFAULT 0`：迁移时旧行补 0，`0` 表示这一列从未推进过，`GET` 一律返回 `appearanceUpdatedAt`。
 - 皮肤沿用 `PresetSkin`：`dataUrl / width / height / isCustomImage? / frontOnly?`。写入端 `createPresetSkin` 与读取端归一化配对，data URI 只认 png / jpeg / webp 白名单（防 `javascript:` 注入）。
 - **正脸双层标记（`frontOnly`）**：16×8 / 32×16 靠尺寸即可自证，但高清皮肤提取出的 64×32 / 128×64 与旧版整肤**同尺寸**，必须随材质携带该标记，否则会被误判成旧版皮肤、从错误区域裁切。
 - MC 皮肤入库前只保留正脸双层（底层正脸 8×8 + 帽子外层 8×8 并排，16×8 或高清等比），通用头像图片等比限制在 512px 内，控制单条记录体积。
 
 ### 4.3 提交协议（谁能改什么）
 - **差量提交（`PATCH /api/rooms/{roomId}/avatars`，写头像的唯一入口）**：请求体是 `{ updates, adds, deletes }` 三件套，服务端只写被提到的行、只写被带上的字段：
-  - `updates: [{ id, layout?, skin?, expectLayoutUpdatedAt?, expectSkinUpdatedAt? }]`：`layout` 是布局字段的局部补丁（没带的键一律不动），`skin` 是整份皮肤记录；两个凭证只在**自己对应的域被写入时**才比对，不符的那一条单独返回 `{ ok: false, error: 'conflict' }`；
+  - `updates: [{ id, layout?, appearance?, skin?, expectLayoutUpdatedAt?, expectAppearanceUpdatedAt?, expectSkinUpdatedAt? }]`：`layout` 是布局字段的局部补丁，`appearance` 是 `overlay` / `flipH` 的局部补丁，`skin` 是整份皮肤记录（没带的键一律不动）；三个凭证只在**自己对应的域被写入时**才比对，不符的那一条单独返回 `{ ok: false, error: 'conflict' }`；一条 `update` 三域都没带就是空操作，不写盘也不推戳；
   - `adds: [整行记录]`：id 已被占用回 `exists`，绝不覆盖别人的行；
   - `deletes: [id]`：幂等，不比对版本戳。
-  - 逐条返回 `{ results: [{ id, ok, error?, skinUpdatedAt?, layoutUpdatedAt? }] }`：某一条失败不影响同批其它条目；成功条目回带新版本戳，客户端只把成功的那些行推进基线，失败的原样留在「待提交」里。
-  - 角色：编辑者只能带 `skin`（带了 `layout` 也照样不写入，不报错），`adds`/`deletes` 一律 403；管理员三者皆可。
+  - 逐条返回 `{ results: [{ id, ok, error?, skinUpdatedAt?, layoutUpdatedAt?, appearanceUpdatedAt? }] }`：某一条失败不影响同批其它条目；成功条目回带新版本戳，客户端只把成功的那些行推进基线，失败的原样留在「待提交」里。
+  - 角色：编辑者能带 `skin` 与 `appearance`（带了 `layout` 也照样不写入，不报错，其中的 `overlay` / `flipH` 一并不生效），`adds`/`deletes` 一律 403；管理员三者皆可。
   - 边界只有体积：单次请求体上限是 `BF_MAX_JSON_BODY_BYTES`（默认 64MiB；旧云函数版本受平台硬限只有 6MiB），前端 `chunkBySize` 按体积切块、**条数不设限**；单次能提到的行数上限就是「一间房最多 `BF_MAX_LAYERS`（默认 512）行」这个真实上限 —— 服务端是按**房间累计**判的（当前行数 − 本批真实删除 + 本次 adds），不是按请求判。
 - **全量覆盖（`PUT /api/rooms/{roomId}`）已拆除**：契约里没有这个端点；`ifRevision` 乐观锁、房间级 `revision`、`MAX_PATCH_UPDATES` 一并消失。
 - **删除（`DELETE /api/rooms/{roomId}`）**：仅管理员，物理删除该房间的全部数据 —— `rooms` 里那一行（外键 `ON DELETE CASCADE` 带走 `room_base` / `avatars` / `room_throttle`）与 `base/` 下的底图文件。
@@ -210,7 +211,7 @@ view.y = view.y + offset.y * (1 - k) + (size.height * (k - 1)) / 2;
 
 ## 5. 测试与工程质量保证
 
-- **单元测试 (Vitest)**：10 个测试套件、146 个单测用例（数字随代码演进，以 `pnpm test` 的输出为准），全面覆盖：
+- **单元测试 (Vitest)**：13 个测试套件、212 个单测用例（数字随代码演进，以 `pnpm test` 的输出为准），全面覆盖：
   - 几何变换与手势数学 (`transform.spec.ts`, `gesture.spec.ts`)
   - 皮肤 UV 贴图与规格解析 (`texture.spec.ts`)
   - 皮肤数据格式与头像记录归一化、内嵌材质安全防注入 (`preset.spec.ts`)
@@ -219,10 +220,11 @@ view.y = view.y + offset.y * (1 - k) + (size.height * (k - 1)) / 2;
   - 多数据源回退与超时控制 (`providers.spec.ts`)
   - 素材管理与撤销/重做历史引用保护 (`editor.spec.ts`)
   - 协同差量切块与请求层体积边界 (`collab/api.spec.ts`)
-  - 差量计算：只发变了的行与字段、两个版本戳分域、失败的条目保留待提交 (`collab/diff.spec.ts`)
+  - 差量计算：只发变了的行与字段、三个版本戳分域、失败的条目保留待提交 (`collab/diff.spec.ts`)
+  - 协同房间的进房能力探测、外观降级与提交接线 (`stores/collab.spec.ts`)
 - **后端单元测试 (pytest)**：`uv run --directory backend pytest -q`，用 `httpx.AsyncClient` 直接打 ASGI 应用（每个用例一份临时数据目录），覆盖建房 / 进房 / 差量提交 / 版本冲突 / 越权 / 限流 / 过期 / 底图上传与下载 / 上限放宽 / 404 / 410 / 413 / 429。用例数以 `pytest -q` 的输出为准。
 - **端到端测试 (CDP-driven)**：`pnpm e2e` 一条命令拉起**真实的 FastAPI 后端**（临时数据目录，跑完即删）与一个临时 Vite dev server，再用 Node.js 原生 DevTools Protocol 驱动本机 Chrome 跑三个阶段（发布 → 编辑者 → 管理员）。三阶段打的是**同一个真实后端**：发布阶段建出来的房间号与两把密码透传给后两个阶段，所以它同时验证了前端、后端与两者之间的协议 —— 不再有页内 mock 后端（`src/dev/collabMock.ts` 已删除）。检查项数以 `pnpm e2e` 的输出为准。
   - **发布阶段**（离线全功能 + 协同发布）：内置皮肤预加载与 UV 像素级核对、拖拽/缩放/旋转/图层顺序/批量导入/导出、无底图时发布被拦下、过期天数随请求走、底图走 multipart 上传到自己的后端（**预签名直传那条老路一次都没被调用**）、上传用编辑密码、房间被切成 `ready`、创建请求快照字段白名单；
-  - **编辑者阶段**：布局锁四路拦截、PATCH 只带 `{id, skin, expectSkinUpdatedAt}`（协议不变性）、服务端位置原封未动、**皮肤戳前进而布局戳一动不动**、冲突只影响那一条并保留待提交、全量 PUT 一次都没被调用；
+  - **编辑者阶段**：布局锁四路拦截、PATCH 只带 `{id, skin, appearance, expectSkinUpdatedAt, expectAppearanceUpdatedAt}`（协议不变性）、服务端位置原封未动、**皮肤戳与外观戳各自前进而布局戳一动不动**、冲突只影响那一条并保留待提交、全量 PUT 一次都没被调用；
   - **管理员阶段**：只有改动过的那一行进 PATCH、布局差量只带变了的字段（x/y）、新增走 `adds` 而非重发整间房、换底图走 multipart 且不碰任何一行头像、删除房间后停在 gone 界面（服务端读回 404）。
   - 每条检查都打印 PASS / FAIL / SKIP，任一阶段没产出结果即判失败（不会被 filter 悄悄吞掉），最后按失败数退出。
