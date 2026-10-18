@@ -351,8 +351,14 @@ async function sendPatch(password: string, patch: RoomPatch): Promise<PatchItemR
   return mergePatchResults(collected);
 }
 
-/** 提交结果汇总成人话（swapped 表示这一次还换了底图） */
-function reportResults(results: PatchItemResult[], swapped = false): void {
+/**
+ * 提交结果汇总成人话（swapped 表示这一次还换了底图）。
+ *
+ * skipped 是"这一次没救回来、被跳过"的皮肤：必须并进这一条提示里。
+ * 分开 notify 会被紧随其后的"已保存 N 处改动"覆盖掉 —— 用户只看到保存了一半，
+ * 剩下那个为什么没保存一个字都没有，于是只能再点一次试试。
+ */
+function reportResults(results: PatchItemResult[], swapped = false, skipped = ''): void {
   const ok = results.filter((r) => r.ok).length;
   const conflicts = results.filter((r) => r.error === 'conflict').length;
   const missing = results.filter((r) => r.error === 'not-found').length;
@@ -360,10 +366,11 @@ function reportResults(results: PatchItemResult[], swapped = false): void {
   const parts: string[] = [];
   if (swapped) parts.push('底图已更换');
   if (ok > 0) parts.push(`已保存 ${ok} 处改动`);
+  if (skipped) parts.push(skipped);
   if (conflicts > 0) parts.push(`${conflicts} 处刚被别人改过，仍留着待提交`);
   if (missing > 0) parts.push(`${missing} 个头像在服务器上已被删除，刷新后可对齐`);
   if (failed > 0) parts.push(`${failed} 处提交失败`);
-  const tone = conflicts === 0 && failed === 0 && missing === 0 ? 'success' : 'warn';
+  const tone = skipped || conflicts || failed || missing ? 'warn' : 'success';
   notify(tone, parts.join('；') || '没有改动需要提交');
 }
 
@@ -402,6 +409,14 @@ export async function submitChanges(): Promise<void> {
     // 只换了底图、头像一行没动：差量是空的，但底图那一步照样得做
     const swapBase = state.role === 'admin' && editor.baseImageId !== baselineBaseId;
 
+    /**
+     * 这一次没救回来、会被跳过的皮肤。
+     *
+     * 不能在这里单独 notify —— 紧随其后的 reportResults 会用自己的消息覆盖掉它，
+     * 用户于是只看到"已保存 N 处改动"，完全不知道还有头像没提交上去，
+     * 只能盯着"未保存 1"再点一次。文案必须由 reportResults 一起发出去。
+     */
+    let skippedNote = '';
     if (patch.failedSkins > 0) {
       // 先试着把被污染的素材用代理重取一遍：代理抖动才是主因，重取往往一次就好。
       // 这比让用户删掉重加快得多，也比直接报"无法编码"诚实 —— 那是结果，不是原因。
@@ -411,16 +426,16 @@ export async function submitChanges(): Promise<void> {
         if (patch.failedSkins === 0) notify('success', `已重取 ${fixed} 张皮肤，现在都能编码了`);
       }
       if (patch.failedSkins > 0) {
-        notify('warn', `${describeEncodeFailure(failedSkinDetails(patch.failedSkinLayerIds))}。这次先跳过它们`);
+        // 这句自带"哪张图 + 该怎么办"，不再补"这次先跳过"之类的碎话
+        skippedNote = describeEncodeFailure(failedSkinDetails(patch.failedSkinLayerIds));
       }
     }
 
     const patchEmpty = patchIsEmpty(patch);
     if (patchEmpty && !swapBase) {
-      notify(
-        'info',
-        describeEncodeFailure(failedSkinDetails(patch.failedSkinLayerIds)) || '没有改动需要提交',
-      );
+      // 有皮肤没救回来 → 这是"没保存成"，不是"没东西可存"，别用 info 轻描淡写地带过
+      const reason = describeEncodeFailure(failedSkinDetails(patch.failedSkinLayerIds));
+      notify(reason ? 'warn' : 'info', reason || '没有改动需要提交');
       return;
     }
     // 换底图：只有管理员，且只动底图那张表（画布尺寸随底图一起走）
@@ -437,7 +452,8 @@ export async function submitChanges(): Promise<void> {
     }
 
     if (patchEmpty) {
-      notify('success', '底图已更换');
+      // 换了底图但一个头像都没提交（全被跳过了）：别把跳过的事咽回去
+      notify(skippedNote ? 'warn' : 'success', skippedNote ? `底图已更换；${skippedNote}` : '底图已更换');
       return;
     }
     const results = await sendPatch(password, patch);
@@ -445,7 +461,7 @@ export async function submitChanges(): Promise<void> {
     const next = new Map(baseline.value);
     advanceBaseline(next, layerStates(), patch, results);
     baseline.value = next;
-    reportResults(results, swapped);
+    reportResults(results, swapped, skippedNote);
   } catch (error) {
     if (error instanceof CollabApiError && error.status === 413) {
       notify('error', error.message);

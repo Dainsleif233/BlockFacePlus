@@ -16,6 +16,7 @@ import {
   registerSkin,
   removeLayer,
   removeSkin,
+  retryTaintedSkins,
   undo,
 } from './editor';
 
@@ -27,6 +28,11 @@ function createMockLoadedImage(width = 64, height = 64): LoadedImage {
     tainted: false,
     url: 'mock://skin.png',
   };
+}
+
+/** 一张"读不到像素"的素材：tainted 为真、带可重取的源地址 */
+function createTaintedLoadedImage(url = 'https://example.test/skin.png'): LoadedImage {
+  return { element: {} as HTMLImageElement, width: 64, height: 64, tainted: true, url };
 }
 
 describe('editor store - 素材管理与历史栈保护', () => {
@@ -217,5 +223,66 @@ describe('encode failure reporting', () => {
 
   it('没有失败项时返回空串，调用方可以直接拿来当 if 条件', () => {
     expect(describeEncodeFailure([])).toBe('');
+  });
+});
+
+describe('retryTaintedSkins —— 一次「完成」就要能把皮肤救回来', () => {
+  beforeEach(() => {
+    editor.layers = [];
+    editor.selectedId = null;
+    clearUnusedSkins();
+  });
+
+  it('第一次没取到干净图不算数，会接着再试', async () => {
+    // 这条锁的是"点一次完成只保存一半"的根因：代理抖一下就会先失败一次。
+    // 只试一次的话这张皮肤会被判为无法编码、跳过不提交，用户必须再点一次。
+    const skin = registerSkin(createTaintedLoadedImage(), 'mua', 'UpSGE', 'MUA 联合认证', 'skin-retry-1');
+    let attempts = 0;
+    const fixed = await retryTaintedSkins(async () => {
+      attempts += 1;
+      // 前两次都掉回第 3 级兜底（tainted 仍为真），第三次才拿到干净图
+      return attempts < 3 ? createTaintedLoadedImage() : createMockLoadedImage();
+    });
+
+    expect(attempts).toBe(3);
+    expect(fixed).toBe(1);
+    expect(getSkin(skin.id)?.tainted).toBe(false);
+  });
+
+  it('怎么试都拿不到干净图时如实回报换了几张（0），不假装成功', async () => {
+    registerSkin(createTaintedLoadedImage(), 'mua', 'UpSGE', 'MUA 联合认证', 'skin-retry-2');
+    let attempts = 0;
+    const fixed = await retryTaintedSkins(async () => {
+      attempts += 1;
+      return createTaintedLoadedImage();
+    });
+
+    expect(fixed).toBe(0);
+    expect(attempts).toBe(3);
+  });
+
+  it('取图直接抛错时按失败处理，不把异常甩给「完成」', async () => {
+    registerSkin(createTaintedLoadedImage(), 'mua', 'UpSGE', 'MUA 联合认证', 'skin-retry-3');
+    let attempts = 0;
+    const fixed = await retryTaintedSkins(async () => {
+      attempts += 1;
+      throw new Error('无法加载图片');
+    });
+
+    expect(fixed).toBe(0);
+    expect(attempts).toBe(3);
+    expect(editor.busy).toBeNull();
+  });
+
+  it('已经是干净图的素材不会被打扰', async () => {
+    registerSkin(createMockLoadedImage(), 'upload', '本地图', '上传', 'skin-retry-4');
+    let attempts = 0;
+    const fixed = await retryTaintedSkins(async () => {
+      attempts += 1;
+      return createMockLoadedImage();
+    });
+
+    expect(fixed).toBe(0);
+    expect(attempts).toBe(0);
   });
 });

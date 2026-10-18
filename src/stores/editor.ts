@@ -20,6 +20,7 @@ import {
 } from '../core/render/exportImage';
 import { loadImage, type LoadedImage } from '../core/sources/imageLoader';
 import {
+  accountCandidatesFor,
   BUILTIN_SKINS,
   loadFirstAvailable,
   MUA_PROVIDER,
@@ -724,7 +725,12 @@ export async function useAccountSkin(name: string): Promise<void> {
   state.busy = `查询 ${name}`;
   try {
     const resolution = await resolveAccountSkin(name);
-    const { result, provider } = await loadFirstAvailable(resolution.candidates, loadCandidate);
+    // 档案服务明确说没有这个人时，镜像站给的默认皮肤是假数据，不能拿来当正版皮肤
+    const candidates = accountCandidatesFor(resolution);
+    if (candidates.length === 0) {
+      throw new SkinLookupError(`正版账号里没有「${name}」`);
+    }
+    const { result, provider } = await loadFirstAvailable(candidates, loadCandidate);
     const skinId = createId('skin');
     registerSkin(result, 'account', resolution.displayName, provider, skinId);
     applySkin(skinId);
@@ -1454,22 +1460,47 @@ export function describeEncodeFailure(
 }
 
 /**
+ * 重取的尝试次数、单次超时与总预算。
+ *
+ * 次数要大于一是有实测依据的：代理冷启动失败后浏览器会按 URL 记负缓存，
+ * 隔一会儿换地址再打往往就通。只试一次的话「完成」会只保存一半，用户得再点一次。
+ * 但也不能无限等：单次 4s、总共 12s，超了就按"这次没救回来"处理。
+ */
+const SKIN_RETRY_ATTEMPTS = 3;
+const SKIN_RETRY_TIMEOUT_MS = 4000;
+const SKIN_RETRY_BUDGET_MS = 12000;
+
+/**
  * 用代理重取一遍被污染的素材。
  *
  * 代理抖动是这次失败最常见的成因：第 2 级失败后 loadImage 会掉到第 3 级非 CORS 兜底，
  * 于是同一张图"刚才还能显示、现在却提交不了"。重取比让用户删掉重加快得多。
+ *
+ * 必须重试多次而不是一次：代理失败会被浏览器按 URL 记进负缓存，一次没通就放弃的话，
+ * 用户点「完成」只会保存一半，剩下的得再点一次 —— 那正是"要点两次完成"的由来。
+ * loadImage 内部每次都会换一个一次性参数，所以重试打的是新地址，不会命中负缓存。
  * 返回成功换上干净图的张数；不改动画布布局，只换同一个 skinId 背后的位图。
  */
-export async function retryTaintedSkins(): Promise<number> {
+export async function retryTaintedSkins(load: typeof loadImage = loadImage): Promise<number> {
   const targets = Array.from(skins.values()).filter((skin) => skin.tainted && skin.sourceUrl);
   if (targets.length === 0) return 0;
   state.busy = '重取皮肤';
   let fixed = 0;
+  const deadline = Date.now() + SKIN_RETRY_BUDGET_MS;
   try {
     for (const skin of targets) {
-      try {
-        const loaded = await loadImage(skin.sourceUrl as string, { proxyTemplate: state.proxyTemplate });
-        if (loaded.tainted) continue;
+      for (let attempt = 0; attempt < SKIN_RETRY_ATTEMPTS && Date.now() < deadline; attempt += 1) {
+        let loaded: LoadedImage | null = null;
+        try {
+          loaded = await load(skin.sourceUrl as string, {
+            proxyTemplate: state.proxyTemplate,
+            timeoutMs: SKIN_RETRY_TIMEOUT_MS,
+          });
+        } catch {
+          loaded = null;
+        }
+        // 掉到第 3 级兜底时 loadImage 不报错，只是把 tainted 置真 —— 那不算成功，继续下一次
+        if (!loaded || loaded.tainted) continue;
         // 同一个 id 原地换图：图层、历史记录、协同一律不受影响。
         // provider / 自定义图 / 正脸双层这些登记时的属性要原样带回去，否则素材会变样。
         const record = state.skins.find((item) => item.id === skin.id);
@@ -1485,8 +1516,7 @@ export async function retryTaintedSkins(): Promise<number> {
           skin.meta.frontOnly,
         );
         fixed += 1;
-      } catch {
-        /* 单张失败就跳过，交给上层按剩余数量提示 */
+        break;
       }
     }
   } finally {

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  accountCandidatesFor,
   loadFirstAvailable,
   MUA_PROVIDER,
   resolveAccountSkin,
@@ -141,5 +142,36 @@ describe('resolveAccountSkin', () => {
     expect(resolution.displayName).toBe('Steve');
     expect(resolution.candidates.length).toBeGreaterThanOrEqual(2);
     expect(resolution.candidates.map((c) => c.provider)).toEqual(['mc-heads.net', 'minotar.net']);
+    // 网络不通只是"查不通"，镜像兜底照常可用
+    expect(resolution.notFound).toBe(false);
+  });
+
+  it('playerdb 明确回答 4xx 时标记 notFound，不再退回镜像', async () => {
+    // minotar 对不存在的名字会返回一张 200 的默认皮肤，退回去就是"假成功"：
+    // 用户账号拼错了，却看到一张 Steve 被当成自己的皮肤贴上去。
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({ ok: false, status: 400 } as unknown as Response);
+
+    const resolution = await resolveAccountSkin('zzzzzzzzzzzzzzzz');
+    expect(resolution.resolved).toBe(false);
+    expect(resolution.notFound).toBe(true);
+    expect(accountCandidatesFor(resolution)).toEqual([]);
+  });
+
+  it('429 限流只算查不通，仍保留镜像候选', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({ ok: false, status: 429 } as unknown as Response);
+
+    const resolution = await resolveAccountSkin('Notch');
+    expect(resolution.notFound).toBe(false);
+    expect(accountCandidatesFor(resolution).length).toBeGreaterThan(0);
+  });
+
+  it('查无此人时才清空候选，查得到时原样返回', async () => {
+    const resolved = {
+      displayName: 'Notch',
+      resolved: true,
+      notFound: false,
+      candidates: [{ url: 'https://textures.minecraft.net/texture/x', provider: 'textures.minecraft.net' }],
+    };
+    expect(accountCandidatesFor(resolved)).toHaveLength(1);
   });
 });

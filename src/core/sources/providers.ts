@@ -20,7 +20,17 @@ export interface AccountResolution {
   displayName: string;
   /** 是否在正版档案中确认存在 */
   resolved: boolean;
+  /**
+   * 档案服务明确回答了"没有这个玩家"（4xx）。
+   *
+   * 必须和"查不通"分开：镜像站（minotar）对不存在的名字也会返回一张默认皮肤，
+   * 混为一谈就会出现"正版里没有这个人，却拿到一张 Steve"这种假成功。
+   */
+  notFound: boolean;
 }
+
+/** Mojang 官方贴图 CDN 的名字，用来把"官方源"和"镜像兜底"分开 */
+export const TEXTURES_PROVIDER = 'textures.minecraft.net';
 
 /** 内置皮肤：随应用分发的真实默认皮肤贴图 */
 export interface BuiltinSkin {
@@ -137,6 +147,9 @@ export async function resolveAccountSkin(name: string, signal?: AbortSignal): Pr
   ];
 
   const { signal: fetchSignal, cleanup } = combineTimeoutSignal(6000, signal);
+  // 只有档案服务**明确否认**这个玩家时才是"查无此人"；超时/网络错误/5xx 都算"查不通"，
+  // 后者仍要往下走备选镜像，不能因为一次超时就说人家账号不存在。
+  let notFound = false;
   try {
     const response = await fetch(`https://playerdb.co/api/player/minecraft/${encodeURIComponent(trimmed)}`, {
       signal: fetchSignal,
@@ -149,12 +162,15 @@ export async function resolveAccountSkin(name: string, signal?: AbortSignal): Pr
         return {
           displayName: player.username ?? trimmed,
           resolved: true,
+          notFound: false,
           candidates: [
-            { url: normalizeTextureUrl(player.skin_texture), provider: 'textures.minecraft.net' },
+            { url: normalizeTextureUrl(player.skin_texture), provider: TEXTURES_PROVIDER },
             ...fallback,
           ],
         };
       }
+    } else if (response.status >= 400 && response.status < 500 && response.status !== 429) {
+      notFound = true;
     }
   } catch (error) {
     if (signal?.aborted) throw error;
@@ -163,7 +179,15 @@ export async function resolveAccountSkin(name: string, signal?: AbortSignal): Pr
     cleanup();
   }
 
-  return { displayName: trimmed, resolved: false, candidates: fallback };
+  return { displayName: trimmed, resolved: false, notFound, candidates: fallback };
+}
+
+/**
+ * 正版档案查无此人时，镜像站会给一张默认皮肤（minotar 实测对不存在的名字返回 64×64）。
+ * 拿这种图当"正版皮肤"是把假数据当真数据，所以确认查无此人时**不提供任何候选**。
+ */
+export function accountCandidatesFor(resolution: AccountResolution): SkinCandidate[] {
+  return resolution.notFound && !resolution.resolved ? [] : resolution.candidates;
 }
 
 /** 递归尝试候选地址，返回第一个成功加载的结果 */

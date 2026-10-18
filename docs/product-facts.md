@@ -47,9 +47,11 @@ MUA（mualliance.ltd）联合认证皮肤走 `skin.mualliance.ltd/api/union/skin
 对应实现：
 
 - `src/core/sources/imageLoader.ts` 的 `loadProxied()` 对第 2 级做一次带 `_bfretry` 标记的重试（`withRetryMarker` 改掉缓存键），仍失败才落到第 3 级；
-- `SkinTexture.sourceUrl` 记住取图地址（`blob:` 除外，它载入后即被 revoke），`retryTaintedSkins()` 用它把被污染的素材用当前代理重取一遍，**原地换同一个 skinId 背后的位图**，图层与历史记录不受影响；
-- 提交（`submitChanges`）与发布（`publishRoom`）在发现编码失败时会先自动重取一次，再决定是继续还是报错；
-- 报错文案由 `describeEncodeFailure()` 生成：点名是哪个头像、哪张素材，并按是否被污染给出"换代理 / 重取"或"改用上传皮肤"两种可执行动作；
+- `SkinTexture.sourceUrl` 记住取图地址（`blob:` 除外，它载入后即被 revoke），`retryTaintedSkins()` 用它把被污染的素材用当前代理重取，**原地换同一个 skinId 背后的位图**，图层与历史记录不受影响；
+- **重取必须多次尝试**：每张最多 3 次、单次 4s、总预算 12s（`SKIN_RETRY_ATTEMPTS` / `SKIN_RETRY_TIMEOUT_MS` / `SKIN_RETRY_BUDGET_MS`）。只试一次的话，代理抖一下这张图就救不回来，会被判为无法编码而**跳过不提交** —— 用户点一次「完成」只保存一半，剩下的必须再点一次，这正是"要点两次完成"的由来；
+- 提交（`submitChanges`）与发布（`publishRoom`）在发现编码失败时会先自动重取，再决定是继续还是报错；
+- 没救回来的皮肤，其说明由 `reportResults()` 和"已保存 N 处改动"**并进同一条提示**（`skipped` 参数），不能单独 `notify` —— 后者会被紧随其后的汇总消息覆盖，用户只看到保存了一半、不知道为什么；
+- 报错文案由 `describeEncodeFailure()` 生成：点名是哪个头像、哪张素材，并按是否被污染给出"重取"或"改用上传皮肤"两种可执行动作；
 - 素材列表里被污染的条目标 `!`，并在标题栏给一个「重取 N」按钮，不必等提交时才发现。
 
 **修改这块时要守住的不变式**：第 3 级兜底可以保留（它保证"图至少看得见"），但任何依赖像素读出的动作（导出 PNG、提交房间、发布）都必须显式检查 `tainted` 并在失败时告诉用户该怎么做 —— 静默吞掉 `SecurityError` 会把一个可修复的配置问题变成一句没法行动的"无法编码"。
