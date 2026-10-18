@@ -10,7 +10,10 @@ export interface LoadedImage {
   element: HTMLImageElement;
   width: number;
   height: number;
-  /** 画布是否已被跨域污染：污染后 toBlob/toDataURL 会抛异常 */
+  /**
+   * 是否为"只能看、读不出像素"的图片：来源网站没允许本程序读取，浏览器会拒绝
+   * toBlob/toDataURL。这类素材能画进画布，但存不下来，必须让用户知道。
+   */
   tainted: boolean;
   /** 实际加载成功的地址（可能是代理地址） */
   url: string;

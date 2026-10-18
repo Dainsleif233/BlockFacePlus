@@ -780,7 +780,7 @@ export async function useMuaSkin(name: string): Promise<void> {
     notify(
       loaded.tainted ? 'warn' : 'success',
       loaded.tainted
-        ? `已加载 MUA 联合认证「${label}」的皮肤，但该来源未开启 CORS 且代理不可用，导出可能失败`
+        ? `已加载 MUA 联合认证「${label}」的皮肤，但这个网站不允许本程序读取图片内容，可能存不下来。点素材列表里的「重取」再试一次`
         : `已加载 MUA 联合认证「${label}」的皮肤`,
     );
   } catch (error) {
@@ -881,7 +881,12 @@ export async function useSkinUrl(rawUrl: string): Promise<void> {
     const label = url.split('/').pop()?.slice(0, 24) || '远程皮肤';
     registerSkin(loaded, 'url', label, new URL(url).hostname, skinId);
     applySkin(skinId);
-    notify(loaded.tainted ? 'warn' : 'success', loaded.tainted ? '皮肤已载入，但该来源未开启 CORS，导出可能失败' : '皮肤已载入');
+    notify(
+      loaded.tainted ? 'warn' : 'success',
+      loaded.tainted
+        ? '皮肤已载入，但这个网站不允许本程序读取图片内容，可能存不下来。点素材列表里的「重取」再试一次'
+        : '皮肤已载入',
+    );
   } catch (error) {
     notify('error', `皮肤地址加载失败：${(error as Error).message}`);
   } finally {
@@ -1419,22 +1424,33 @@ export function encodeLayerSkin(layerId: string): PresetSkin | null {
 }
 
 /**
- * 把"皮肤编码失败"翻译成用户能动手的句子。
+ * 把"皮肤保存不了"翻译成用户能动手的句子。
  *
- * 这件事的因果链对用户是完全不可见的：画布被一张没有 CORS 头的图污染过，
- * 浏览器出于安全拒绝 toDataURL，于是这个头像既导不出去、也提交不进房间。
- * 但界面上它明明画得好好的 —— 所以必须点名是哪张图、说明它为什么特殊、
- * 再给出两条能走通的路，否则用户只能一张张试。
+ * 两件事在用户眼里是同一件：图明明画在画布上，却存不下来。原因在浏览器安全策略里 ——
+ * 图片来自别的网站、对方没允许本程序读取它的像素，画布就被标记为"只能看不能读"。
+ * 这些词（跨域、CORS、污染、编码）**一个都不该出现在提示里**：用户既不知道它们指什么，
+ * 也没法据此行动。要说的是三件事：哪个头像、为什么、现在能做什么。
+ *
+ * 能做的只有两件真实存在的操作：「重取」（有时只是刚才取图临时失败）和
+ * 「上传皮肤」（把图下到本地再导入，绕开对方网站的许可问题）。
+ * 别再提"配置代理模板"之类 —— 界面上根本没有这个设置。
  */
 export function describeEncodeFailure(
   failed: { name: string; skinLabel: string; tainted: boolean }[],
 ): string {
   if (failed.length === 0) return '';
-  const names = failed.map((item) => `「${item.name}」（${item.skinLabel}）`).join('、');
+  // 头像名里往往已经含了素材来源（如"头像 1 · UpSGE"），再补一次只是噪音
+  const names = failed
+    .map((item) =>
+      item.skinLabel && !item.name.includes(item.skinLabel)
+        ? `「${item.name}」（${item.skinLabel}）`
+        : `「${item.name}」`,
+    )
+    .join('、');
   const anyTainted = failed.some((item) => item.tainted);
   return anyTainted
-    ? `有 ${failed.length} 个头像的皮肤取不到干净的图：${names}。这些来源没有开放跨域，画布已被污染，浏览器拒绝导出与提交。填好可用的代理模板后点「重取」再试，或改用「上传皮肤」`
-    : `有 ${failed.length} 个头像的皮肤无法编码：${names}。请重新载入这些皮肤的图片后再提交`;
+    ? `${names}用的皮肤是从别的网站直接取来的，那个网站不允许本程序读取图片内容，所以这张皮肤存不下来。先点「重取」再试一次（多半是刚才取图临时失败）；还是不行，就把皮肤图片下载到本地，用「上传皮肤」导入。`
+    : `${names}的皮肤图片读不出来。把这张皮肤下载到本地，用「上传皮肤」重新导入后再试。`;
 }
 
 /**

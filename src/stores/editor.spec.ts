@@ -187,21 +187,32 @@ describe('encode failure reporting', () => {
     expect(payload.failedSkinLayers).toEqual([]);
   });
 
-  it('污染过的素材在提示里被点名，并给出两条可走的路', () => {
+  it('读不出像素的素材在提示里被点名，并给出两条能真正走通的路', () => {
     const text = describeEncodeFailure([
       { name: '头像 1', skinLabel: 'UpSGE', tainted: true },
     ]);
     expect(text).toContain('头像 1');
     expect(text).toContain('UpSGE');
-    expect(text).toContain('代理');
+    // 用户能做的只有这两件：重取一次，或把图存到本地再导入
+    expect(text).toContain('重取');
     expect(text).toContain('上传皮肤');
   });
 
-  it('没被污染（只是编码不出来）时说的是重新载入，不甩锅给跨域', () => {
+  it('提示里不出现实现术语 —— 那些词对用户没有可执行含义', () => {
+    // "干净""污染""跨域""CORS""编码""代理模板"都曾是这里的话。用户看不懂，
+    // 而且"配置代理模板"这个建议本身就是错的：界面上根本没有这个设置。
+    const jargon = ['干净', '污染', '跨域', 'CORS', '编码', '代理', '画布'];
+    for (const item of [{ tainted: true }, { tainted: false }]) {
+      const text = describeEncodeFailure([{ name: '头像 3', skinLabel: 'x.png', ...item }]);
+      for (const word of jargon) expect(text).not.toContain(word);
+    }
+  });
+
+  it('读不出内容（与网站许可无关）时也只说该怎么办', () => {
     const text = describeEncodeFailure([{ name: '头像 2', skinLabel: 'a.png', tainted: false }]);
     expect(text).toContain('头像 2');
-    expect(text).toContain('重新载入');
-    expect(text).not.toContain('代理');
+    expect(text).toContain('上传皮肤');
+    expect(text).not.toContain('重取');
   });
 
   it('没有失败项时返回空串，调用方可以直接拿来当 if 条件', () => {

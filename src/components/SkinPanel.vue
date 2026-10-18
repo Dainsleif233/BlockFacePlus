@@ -55,7 +55,7 @@ const hasUnusedSkins = computed(() => {
 });
 
 /**
- * 被跨域污染过的素材：图能看见，但导出/提交时浏览器拒绝读像素。
+ * 可能存不下来的素材：图能看见，但来源网站不允许本程序读取像素，导出/提交时会失败。
  * 这类失败多半是代理抖了一下，值得给一个"再试一次"的入口，而不是让用户删掉重加。
  */
 const taintedCount = computed(() => editor.skins.filter((s) => s.tainted).length);
@@ -65,7 +65,9 @@ async function retryTainted(): Promise<void> {
   const fixed = await retryTaintedSkins();
   notify(
     fixed > 0 ? 'success' : 'warn',
-    fixed > 0 ? `已重取 ${fixed} 张皮肤，现在都能导出了` : '重取没成功：检查代理模板，或改用「上传皮肤」',
+    fixed > 0
+      ? `已重取 ${fixed} 张皮肤，现在存得下来了`
+      : '重取还是没成功：把这几张皮肤图片下载到本地，用「上传皮肤」导入',
   );
 }
 
@@ -192,7 +194,7 @@ async function onImageDrop(event: DragEvent): Promise<void> {
         </div>
       </section>
 
-      <section class="bf-sblk bf-sblk--gold" title="经 playerdb.co 取回贴图；Mojang 官方接口不返回跨域头，纯前端无法直连">
+      <section class="bf-sblk bf-sblk--gold" title="经 playerdb.co 取回贴图；Mojang 官方接口不允许浏览器直接读取，纯前端没法直连">
         <div
           class="bf-sblk-t"
           :title="'一次填多个账号（空格、逗号或换行隔开）会各加一个头像，最多 ' + MAX_BATCH + ' 个'"
@@ -223,7 +225,7 @@ async function onImageDrop(event: DragEvent): Promise<void> {
 
       <section
         class="bf-sblk bf-sblk--gold"
-        title="MUA 联合认证（mualliance.ltd）：按 ID 从 Union 皮肤站取图；该站不发跨域头，取图会走与「网络地址」同一套代理兜底"
+        title="MUA 联合认证（mualliance.ltd）：按 ID 从 Union 皮肤站取图；该站不允许本程序直接读取图片，取图会走代理中转"
       >
         <div
           class="bf-sblk-t"
@@ -336,7 +338,7 @@ async function onImageDrop(event: DragEvent): Promise<void> {
               type="button"
               class="bf-btn bf-btn--sm bf-btn--quiet skin-clean-btn"
               :disabled="busy"
-              :title="taintedCount + ' 张素材的来源没开跨域，导出与提交会失败；点这里用当前代理模板重新取一遍'"
+              :title="taintedCount + ' 张素材可能存不下来：它们来自不允许本程序读取内容的网站。点这里重新取一遍，多半是刚才取图临时失败'"
               @click="retryTainted"
             >
               重取 {{ taintedCount }}
@@ -367,7 +369,7 @@ async function onImageDrop(event: DragEvent): Promise<void> {
               </span>
               <span class="bf-lay-n">{{ record.sourceLabel }}</span>
               <span class="bf-lay-m">{{ record.meta.label }}</span>
-              <i v-if="record.tainted" class="row__warn" title="该来源未开启 CORS，导出可能失败" aria-hidden="true">!</i>
+              <i v-if="record.tainted" class="row__warn" title="这张皮肤可能存不下来：来源网站不允许本程序读取图片内容。点上方「重取」再试，或改用「上传皮肤」" aria-hidden="true">!</i>
             </button>
             <button
               v-if="record.origin !== 'builtin'"
