@@ -5,7 +5,7 @@
 -- 否则"换底图"和"换头像"的整份回写会互相覆盖。到了 SQLite 里，这件事由行级 UPDATE 保证：
 --   rooms        房间身份：只在建房时写一次，此后再没有任何代码路径会写它
 --   room_base    底图指针 + 画布尺寸 + 房间状态（draft/ready）：只有上传底图这条路会写
---   avatars      一个头像一行：布局字段与皮肤字段各有各的版本戳，改一个不动另一个
+--   avatars      一个头像一行：布局 / 外观 / 皮肤各有各的版本戳，改一个不动另外两个
 --   room_throttle 密码试错限流：按房间算，状态落盘（放内存里等于没写）
 --
 -- 所有写路径都走 Database.transaction()（单连接 + 写锁 + BEGIN IMMEDIATE），
@@ -52,13 +52,15 @@ CREATE INDEX IF NOT EXISTS idx_room_base_status ON room_base (status);
 CREATE TABLE IF NOT EXISTS avatars (
   room_id           TEXT    NOT NULL REFERENCES rooms (room_id) ON DELETE CASCADE,
   id                TEXT    NOT NULL,
-  -- 布局字段：布局补丁只覆盖这几列
+  -- 布局字段：布局补丁只覆盖这几列（overlay/flip_h 归外观域，见下）
   name              TEXT    NOT NULL,
   x                 REAL    NOT NULL,
   y                 REAL    NOT NULL,
   size              INTEGER NOT NULL,
   rotation          INTEGER NOT NULL,
   opacity           REAL    NOT NULL,
+  -- 外观字段（帽子层 / 水平翻转）：与布局分属两个域，编辑者也能写，
+  -- 版本戳是下面独立的 appearance_updated_at
   overlay           INTEGER NOT NULL,
   flip_h            INTEGER NOT NULL,
   visible           INTEGER NOT NULL,
@@ -68,6 +70,8 @@ CREATE TABLE IF NOT EXISTS avatars (
   skin_json         TEXT,
   skin_updated_at   INTEGER NOT NULL,
   layout_updated_at INTEGER NOT NULL,
+  -- 外观域自己的版本戳：旧房间由 db._ADDED_COLUMNS 补列，0 表示从未推进过
+  appearance_updated_at INTEGER NOT NULL DEFAULT 0,
   -- 同一间房里一个头像 id 只有一行：这就是旧版"头像/<${id}>.json 一个键"的等价物
   PRIMARY KEY (room_id, id)
 );

@@ -2,7 +2,8 @@
 # Copyright 2026 Dainsleif · Apache License 2.0
 #
 # 这一组用例盯的是三条铁律与角色约束：
-#   只写被提到的行 / 行内按字段域写 / 缺的键不动 / 编辑者只能换皮肤。
+#   只写被提到的行 / 行内按字段域写 / 缺的键不动 /
+#   编辑者能换皮肤、能改外观（帽子层、水平翻转），layout 整条忽略。
 
 from __future__ import annotations
 
@@ -99,7 +100,8 @@ async def test_admin_can_add_and_delete(harness):
     added = await patch(harness, room_id, admin, {"adds": [draft("l2", name="新头像", order=3)]})
     result = added.json()["results"][0]
     assert result["id"] == "l2" and result["ok"] is True
-    assert result["skinUpdatedAt"] == result["layoutUpdatedAt"]  # 新增行的两个戳同时生成
+    assert result["skinUpdatedAt"] == result["layoutUpdatedAt"]  # 新增行的三个戳同时生成
+    assert result["appearanceUpdatedAt"] == result["skinUpdatedAt"]
     avatars = (await snapshot(harness, room_id, admin))["avatars"]
     assert [a["id"] for a in avatars] == ["l1", "l2"]
     assert avatars[1]["name"] == "新头像"
@@ -119,8 +121,10 @@ async def test_admin_can_add_and_delete(harness):
 
 async def test_update_error_codes(harness):
     # 每条用不同的 id：同一个 id 在一次请求里会被去重成"最后一条"（与旧实现一致），
-    # 要一次看到五种错误就得给五个不同的目标行
-    room_id, _edit, admin = await harness.create_ok(layers=[draft("l1"), draft("l2"), draft("l3")])
+    # 要看全每种错误就得给每种一个不同的目标行
+    room_id, _edit, admin = await harness.create_ok(
+        layers=[draft("l1"), draft("l2"), draft("l3"), draft("l4")]
+    )
     response = await patch(
         harness,
         room_id,
@@ -132,6 +136,7 @@ async def test_update_error_codes(harness):
                 {"id": "l1", "layout": "不是对象"},
                 {"id": "l2", "skin": {"dataUrl": "data:image/svg+xml;base64,AAAA"}},
                 {"id": "l3", "skin": None},
+                {"id": "l4", "appearance": "不是对象"},
             ]
         },
     )
@@ -141,6 +146,7 @@ async def test_update_error_codes(harness):
         "invalid-layout",
         "invalid-skin",
         "invalid-skin",
+        "invalid-appearance",
     ]
     assert all(item["ok"] is False for item in response.json()["results"])
 
@@ -232,6 +238,7 @@ async def test_empty_patch_is_a_noop_and_keeps_version_stamps(harness):
             "ok": True,
             "skinUpdatedAt": before["skinUpdatedAt"],
             "layoutUpdatedAt": before["layoutUpdatedAt"],
+            "appearanceUpdatedAt": before["appearanceUpdatedAt"],
         }
     ]
     empty = await patch(harness, room_id, admin, {})
@@ -284,6 +291,23 @@ async def test_version_stamps_advance_when_clock_does_not(open_harness, tmp_path
         second = await patch(harness, room_id, admin, {"updates": [{"id": "l1", "layout": {"x": 2}}]})
         assert first.json()["results"][0]["layoutUpdatedAt"] > before["layoutUpdatedAt"]
         assert second.json()["results"][0]["layoutUpdatedAt"] > first.json()["results"][0]["layoutUpdatedAt"]
+
+        # 外观域同样要跟单调：它和布局共用一个 now，时钟停住时得靠「旧戳 + 1」推上去，
+        # 否则两次翻转会拿到同一个戳，第二个人拿第一次的凭证照样能写。
+        # 基准取这行在写外观之前的三域最大戳：外观没自己的历史时它等于布局戳，
+        # 正是「时钟停住，只能靠旧戳 + 1 往上顶」的那个起点。
+        before_appearance = (await snapshot(harness, room_id, admin))["avatars"][0]
+        baseline = max(
+            before_appearance["skinUpdatedAt"],
+            before_appearance["layoutUpdatedAt"],
+            before_appearance["appearanceUpdatedAt"],
+        )
+        third = await patch(harness, room_id, admin, {"updates": [{"id": "l1", "appearance": {"overlay": False}}]})
+        fourth = await patch(harness, room_id, admin, {"updates": [{"id": "l1", "appearance": {"overlay": True}}]})
+        # 不是「比其他域大」（同一个 now 下这几乎恒真），而是必须真的比写之前的戳大：
+        # 少了这一句，now 退回纯时钟也会通过。
+        assert third.json()["results"][0]["appearanceUpdatedAt"] > baseline
+        assert fourth.json()["results"][0]["appearanceUpdatedAt"] > third.json()["results"][0]["appearanceUpdatedAt"]
 
 
 async def test_adds_are_normalized_like_create(harness):
@@ -368,3 +392,148 @@ async def test_adds_are_capped_by_the_room_total_not_by_the_request(open_harness
         again = await patch(harness, room_id, admin, {"adds": [draft("l8")]})
         assert again.status_code == 200, again.text
         assert len((await snapshot(harness, room_id, admin))["avatars"]) == 3
+
+
+async def test_editor_can_change_appearance_fields(harness):
+    """编辑者能切帽子层 / 水平翻转；layout 仍然整条忽略（见下面的用例）"""
+    room_id, edit, _admin = await harness.create_ok(layers=[draft("l1", x=5)])
+    before = (await snapshot(harness, room_id, edit))["avatars"][0]
+
+    response = await patch(
+        harness,
+        room_id,
+        edit,
+        {"updates": [{"id": "l1", "appearance": {"overlay": False, "flipH": True}}]},
+    )
+    assert response.status_code == 200, response.text
+    result = response.json()["results"][0]
+    assert result["ok"] is True
+    assert result["appearanceUpdatedAt"] > before["appearanceUpdatedAt"]
+    # 外观推进不该带着布局一起动
+    assert result["layoutUpdatedAt"] == before["layoutUpdatedAt"]
+
+    after = (await snapshot(harness, room_id, edit))["avatars"][0]
+    assert after["overlay"] is False
+    assert after["flipH"] is True
+    assert after["x"] == 5
+    assert after["layoutUpdatedAt"] == before["layoutUpdatedAt"]
+    assert after["skinUpdatedAt"] == before["skinUpdatedAt"]
+
+
+async def test_editor_legacy_layout_overlay_is_still_silently_ignored(harness):
+    """编辑者把帽子层塞进 layout：与旧行为一致，整条忽略，也不报错"""
+    room_id, edit, _admin = await harness.create_ok(layers=[draft("l1", overlay=True, flipH=False)])
+    before = (await snapshot(harness, room_id, edit))["avatars"][0]
+
+    response = await patch(
+        harness,
+        room_id,
+        edit,
+        {"updates": [{"id": "l1", "layout": {"overlay": False, "flipH": True}}]},
+    )
+    assert response.status_code == 200, response.text
+    result = response.json()["results"][0]
+    assert result["ok"] is True
+    assert result["appearanceUpdatedAt"] == before["appearanceUpdatedAt"]
+
+    after = (await snapshot(harness, room_id, edit))["avatars"][0]
+    assert after["overlay"] is True
+    assert after["flipH"] is False
+    assert after["appearanceUpdatedAt"] == before["appearanceUpdatedAt"]
+
+
+async def test_admin_legacy_layout_overlay_still_applies(harness):
+    """旧客户端（管理员）把 overlay/flipH 塞在 layout 里：仍然生效，但只推外观戳"""
+    room_id, _edit, admin = await harness.create_ok(layers=[draft("l1", x=7)])
+    before = (await snapshot(harness, room_id, admin))["avatars"][0]
+
+    response = await patch(
+        harness,
+        room_id,
+        admin,
+        {"updates": [{"id": "l1", "layout": {"overlay": False, "flipH": True}}]},
+    )
+    assert response.status_code == 200, response.text
+    result = response.json()["results"][0]
+    assert result["ok"] is True
+    assert result["appearanceUpdatedAt"] > before["appearanceUpdatedAt"]
+    # 布局戳不为一次翻转动弹：这两个键属于外观域
+    assert result["layoutUpdatedAt"] == before["layoutUpdatedAt"]
+
+    after = (await snapshot(harness, room_id, admin))["avatars"][0]
+    assert after["overlay"] is False
+    assert after["flipH"] is True
+    assert after["layoutUpdatedAt"] == before["layoutUpdatedAt"]
+
+
+async def test_appearance_conflict_is_scoped_to_its_own_stamp(harness):
+    room_id, _edit, admin = await harness.create_ok(layers=[draft("l1")])
+    before = (await snapshot(harness, room_id, admin))["avatars"][0]
+
+    first = await patch(
+        harness,
+        room_id,
+        admin,
+        {"updates": [{"id": "l1", "appearance": {"overlay": False}, "expectAppearanceUpdatedAt": before["appearanceUpdatedAt"]}]},
+    )
+    assert first.json()["results"][0]["ok"] is True
+
+    # 旧外观戳就不该再放行第二次
+    stale = await patch(
+        harness,
+        room_id,
+        admin,
+        {"updates": [{"id": "l1", "appearance": {"overlay": True}, "expectAppearanceUpdatedAt": before["appearanceUpdatedAt"]}]},
+    )
+    assert stale.json()["results"] == [{"id": "l1", "ok": False, "error": "conflict"}]
+
+    # 反过来：外观推进过之后，拿旧布局戳改布局不该被判冲突（两个域各认各的）
+    layout_ok = await patch(
+        harness,
+        room_id,
+        admin,
+        {"updates": [{"id": "l1", "layout": {"x": 3}, "expectLayoutUpdatedAt": before["layoutUpdatedAt"]}]},
+    )
+    assert layout_ok.json()["results"][0]["ok"] is True
+
+    # 外观域自己变了之后，最新外观戳就能放行
+    current = (await snapshot(harness, room_id, admin))["avatars"][0]
+    fresh = await patch(
+        harness,
+        room_id,
+        admin,
+        {"updates": [{"id": "l1", "appearance": {"flipH": True}, "expectAppearanceUpdatedAt": current["appearanceUpdatedAt"]}]},
+    )
+    assert fresh.json()["results"][0]["ok"] is True
+
+
+async def test_explicit_appearance_wins_over_the_legacy_layout_copy(harness):
+    """同一条 update 两个地方都带了 overlay：以显式的 appearance 为准"""
+    room_id, _edit, admin = await harness.create_ok(layers=[draft("l1", overlay=True)])
+    response = await patch(
+        harness,
+        room_id,
+        admin,
+        {"updates": [{"id": "l1", "layout": {"overlay": False}, "appearance": {"overlay": True}}]},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["results"][0]["ok"] is True
+    assert (await snapshot(harness, room_id, admin))["avatars"][0]["overlay"] is True
+
+
+async def test_empty_appearance_patch_is_a_noop(harness):
+    room_id, _edit, admin = await harness.create_ok(layers=[draft("l1")])
+    before = (await snapshot(harness, room_id, admin))["avatars"][0]
+
+    response = await patch(harness, room_id, admin, {"updates": [{"id": "l1", "appearance": {}}]})
+    assert response.json()["results"] == [
+        {
+            "id": "l1",
+            "ok": True,
+            "skinUpdatedAt": before["skinUpdatedAt"],
+            "layoutUpdatedAt": before["layoutUpdatedAt"],
+            "appearanceUpdatedAt": before["appearanceUpdatedAt"],
+        }
+    ]
+    after = (await snapshot(harness, room_id, admin))["avatars"][0]
+    assert after["appearanceUpdatedAt"] == before["appearanceUpdatedAt"]

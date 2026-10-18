@@ -62,7 +62,7 @@ backend/
 | :-- | :-- |
 | `rooms` | 房间身份：房间号、创建/过期时间、两个密码的 scrypt 哈希与长度 |
 | `room_base` | 底图指针 + 画布尺寸 + 房间状态（`draft` / `ready`） |
-| `avatars` | 一个头像一行：布局列 + 皮肤 JSON + 两个版本戳（`skin_updated_at` / `layout_updated_at`） |
+| `avatars` | 一个头像一行：布局列 + 外观列 + 皮肤 JSON + 三个版本戳（`skin_updated_at` / `layout_updated_at` / `appearance_updated_at`） |
 | `room_throttle` | 按房间的密码试错计数与锁定截止时间 |
 
 - SQLite 开 WAL、`busy_timeout=5000`、`foreign_keys=ON`；单连接 + 写锁，所有写路径都走 `transaction()`。

@@ -16,7 +16,9 @@ import aiosqlite
 import pytest
 
 import bfp.db as bfp_db
+from bfp.security import ADMIN_PASSWORD_LENGTH, EDIT_PASSWORD_LENGTH, hash_password
 from bfp.db import Database
+from conftest import pwd
 
 # 加预览之前的 room_base：没有 preview_* 四列
 LEGACY_SCHEMA = """
@@ -38,6 +40,29 @@ CREATE TABLE room_base (
   height     INTEGER NOT NULL,
   status     TEXT    NOT NULL CHECK (status IN ('draft', 'ready')),
   updated_at INTEGER NOT NULL
+);
+"""
+
+
+# 外观域拆分之前的 avatars：布局与外观共用一个 layout_updated_at，没有 appearance_updated_at
+LEGACY_AVATAR_TABLE = """
+CREATE TABLE avatars (
+  room_id           TEXT    NOT NULL REFERENCES rooms (room_id) ON DELETE CASCADE,
+  id                TEXT    NOT NULL,
+  name              TEXT    NOT NULL,
+  x                 REAL    NOT NULL,
+  y                 REAL    NOT NULL,
+  size              INTEGER NOT NULL,
+  rotation          INTEGER NOT NULL,
+  opacity           REAL    NOT NULL,
+  overlay           INTEGER NOT NULL,
+  flip_h            INTEGER NOT NULL,
+  visible           INTEGER NOT NULL,
+  order_index       INTEGER NOT NULL,
+  skin_json         TEXT,
+  skin_updated_at   INTEGER NOT NULL,
+  layout_updated_at INTEGER NOT NULL,
+  PRIMARY KEY (room_id, id)
 );
 """
 
@@ -218,3 +243,63 @@ def test_busy_timeout_is_set_before_switching_to_wal():
     assert body.index("PRAGMA busy_timeout=5000") < body.index("_switch_to_wal(conn)"), (
         "busy_timeout 必须排在切换 WAL 之前"
     )
+
+
+async def test_legacy_avatars_gain_the_appearance_stamp_at_zero(open_harness, tmp_path):
+    """旧房间行补列后 appearance_updated_at = 0，GET 原样返回 0。
+
+    0 是「外观从未推进过」的唯一表示：客户端据此把外观基线放在 0 上，
+    第一次翻转才会拿 0 当并发凭证 —— 补成 NULL 或者补成 layout 的旧戳都会让这条路走不通。
+    """
+    edit_password = "editpass"
+    admin_password = "adminpass123"
+    edit_hash = await hash_password(edit_password)
+    admin_hash = await hash_password(admin_password)
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(data_dir / "bfp.sqlite3") as legacy:
+        legacy.executescript(LEGACY_SCHEMA + LEGACY_AVATAR_TABLE)
+        legacy.execute(
+            "INSERT INTO rooms VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("room0001", 1, 9_999_999_999_999, edit_hash, admin_hash, EDIT_PASSWORD_LENGTH, ADMIN_PASSWORD_LENGTH),
+        )
+        legacy.execute(
+            "INSERT INTO room_base VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("room0001", "png", "image/png", "底图.png", 1920, 1080, "ready", 3),
+        )
+        # 旧行：布局与外观共用一个戳，overlay=1 / flip_h=0，出现在头像里
+        legacy.execute(
+            "INSERT INTO avatars VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("room0001", "l1", "旧头像", 12.0, 34.0, 256, 0, 1.0, 1, 0, 1, 0, None, 500, 500),
+        )
+
+    async with open_harness(tmp_path) as harness:
+        columns = {row["name"] for row in await harness.db.fetchall("PRAGMA table_info(avatars)")}
+        assert "appearance_updated_at" in columns
+
+        row = await harness.db.fetchone("SELECT * FROM avatars WHERE room_id = ?", ("room0001",))
+        assert row["appearance_updated_at"] == 0
+        assert row["layout_updated_at"] == 500
+        # 旧数据一个字节都不能少
+        assert row["x"] == 12.0
+        assert row["name"] == "旧头像"
+
+        response = await harness.client.get("/api/rooms/room0001", headers=pwd(admin_password))
+        assert response.status_code == 200, response.text
+        avatar = response.json()["avatars"][0]
+        assert avatar["appearanceUpdatedAt"] == 0
+        assert avatar["layoutUpdatedAt"] == 500
+        assert avatar["overlay"] is True
+
+        # 旧客户端（管理员）把 overlay 塞在 layout 里：仍然生效，但只推进外观戳
+        patched = await harness.client.patch(
+            "/api/rooms/room0001/avatars",
+            headers=pwd(admin_password),
+            json={"updates": [{"id": "l1", "layout": {"overlay": False}}]},
+        )
+        assert patched.status_code == 200, patched.text
+        result = patched.json()["results"][0]
+        assert result["ok"] is True
+        assert result["appearanceUpdatedAt"] > 0
+        assert result["layoutUpdatedAt"] == 500

@@ -71,8 +71,8 @@ DAY_MS = 86_400_000
 
 AVATAR_INSERT = (
     "INSERT INTO avatars (room_id, id, name, x, y, size, rotation, opacity, overlay, flip_h, visible, "
-    "order_index, skin_json, skin_updated_at, layout_updated_at) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    "order_index, skin_json, skin_updated_at, layout_updated_at, appearance_updated_at) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 )
 
 
@@ -169,6 +169,8 @@ def room_avatar(row: aiosqlite.Row) -> dict[str, Any]:
         "skin": json.loads(row["skin_json"]) if row["skin_json"] else None,
         "skinUpdatedAt": row["skin_updated_at"],
         "layoutUpdatedAt": row["layout_updated_at"],
+        # 旧行补列后是 0（= 外观从未推进过），原样返回：客户端据此把外观基线放在 0 上
+        "appearanceUpdatedAt": row["appearance_updated_at"] or 0,
     }
 
 
@@ -188,6 +190,7 @@ def avatar_insert_params(room_id: str, record: dict[str, Any], now: int) -> tupl
         int(record["visible"]),
         record["order"],
         json.dumps(record["skin"], ensure_ascii=False) if record["skin"] is not None else None,
+        now,
         now,
         now,
     )

@@ -4,20 +4,23 @@
 # PATCH /api/rooms/{roomId}/avatars
 # 入参：
 #   {
-#     updates: [{ id, layout?: {位置/大小/旋转/顺序/名字…}, skin?: PresetSkin,
-#                 expectLayoutUpdatedAt?, expectSkinUpdatedAt? }],
+#     updates: [{ id, layout?: {位置/大小/旋转/顺序/名字…}, appearance?: {overlay, flipH},
+#                 skin?: PresetSkin, expectLayoutUpdatedAt?, expectAppearanceUpdatedAt?,
+#                 expectSkinUpdatedAt? }],
 #     adds:    [完整的一行头像记录],
 #     deletes: [id]
 #   }
-# 出参：{ results: [{ id, ok, error?, skinUpdatedAt?, layoutUpdatedAt? }] }
+# 出参：{ results: [{ id, ok, error?, skinUpdatedAt?, layoutUpdatedAt?, appearanceUpdatedAt? }] }
 #
 # 三条铁律（与旧实现逐条对齐）：
 #  1. 只写请求里真的提到的行 —— 没提到的行一个字节都不碰；
-#  2. 行内按字段域写 —— layout 补丁只覆盖布局列，skin 只覆盖皮肤列，
-#     两个版本戳各管各的，所以"有人在挪位置"和"有人在换皮肤"互不冲突；
+#  2. 行内按字段域写 —— layout / appearance / skin 各管各的列与版本戳，
+#     所以"有人在挪位置""有人在切帽子层""有人在换皮肤"三件事互不冲突；
 #  3. 缺的键不动（不是"用默认值补齐"），所以前端可以只发改动的最小集合。
 #
-# 编辑者：只能换皮肤（layout 原样忽略、不报错；加/删头像 403）；管理员：三者皆可。
+# 编辑者：能换皮肤、能改外观（帽子层 / 水平翻转）；layout 原样忽略、不报错；加/删头像 403。
+# 管理员：三者皆可。旧客户端把 overlay/flipH 塞在 layout 里发过来时管理员的这条仍然生效，
+# 只是它推进的是外观域的戳，不是布局的。
 #
 # 整段读写包在一个事务里：先读版本戳、再决定写不写、最后落地。
 # 不包事务的话，两个并发请求会各自读到同一个旧戳，然后都判定"没冲突"——双方都赢，一方白写。
@@ -36,9 +39,11 @@ from .errors import ApiError, json_response, password_of, read_json_body
 from .normalize import (
     LAYER_ID_RE,
     is_record,
+    normalize_appearance_patch,
     normalize_avatar_record,
     normalize_layout_patch,
     normalize_skin_record,
+    split_layout_domains,
 )
 from .rooms import (
     AVATAR_INSERT,
@@ -53,7 +58,9 @@ __all__ = ["router"]
 
 router = APIRouter(prefix="/api/rooms", tags=["avatars"])
 
-# 补丁键 → 数据库列名。"order" 是 SQL 关键字，落库叫 order_index
+# 补丁键 → 数据库列名。"order" 是 SQL 关键字，落库叫 order_index。
+# 外观域单列：这两个键不再跟布局共用一个版本戳，否则编辑者一旦不能改布局，
+# 帽子层和翻转也跟着冻住 —— 而它们跟位置/尺寸没有任何关系。
 LAYOUT_COLUMNS = {
     "name": "name",
     "x": "x",
@@ -61,10 +68,12 @@ LAYOUT_COLUMNS = {
     "size": "size",
     "rotation": "rotation",
     "opacity": "opacity",
-    "overlay": "overlay",
-    "flipH": "flip_h",
     "visible": "visible",
     "order": "order_index",
+}
+APPEARANCE_COLUMNS = {
+    "overlay": "overlay",
+    "flipH": "flip_h",
 }
 
 
@@ -92,6 +101,26 @@ def _is_number(value: Any) -> bool:
 
 def _sql_value(value: Any) -> Any:
     return int(value) if isinstance(value, bool) else value
+
+
+def _ok_result(
+    layer_id: str,
+    skin_updated_at: int,
+    layout_updated_at: int,
+    appearance_updated_at: int,
+) -> dict[str, Any]:
+    """一条「成功」结果的统一形状。
+
+    三个域各回各的版本戳，客户端拿它当同域名下一次写入的并发凭证；
+    空操作、改、增三条分支的返回结构必须一致，否则前端要按分支分别处理。
+    """
+    return {
+        "id": layer_id,
+        "ok": True,
+        "skinUpdatedAt": skin_updated_at,
+        "layoutUpdatedAt": layout_updated_at,
+        "appearanceUpdatedAt": appearance_updated_at,
+    }
 
 
 def _dedupe(items: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -165,10 +194,15 @@ async def patch_avatars(request: Request, room_id: str) -> JSONResponse:
 
     async with db.transaction() as conn:
         # 版本戳必须严格递增；毫秒时钟在连续请求中可能不前进，导致旧凭证被误放行。
+        # 三个域的戳都要纳入最大值，少一列就会出现「外观写了个比旧戳还小的 now」，
+        # 于是下一条并发请求拿旧凭证照样放行。
         cursor = await conn.execute(
-            "SELECT MAX(CASE WHEN skin_updated_at > layout_updated_at THEN skin_updated_at ELSE layout_updated_at END) AS latest "
-            "FROM avatars WHERE room_id = ?",
-            (meta["room_id"],),
+            "SELECT MAX(latest) AS latest FROM ("
+            "SELECT skin_updated_at AS latest FROM avatars WHERE room_id = ? "
+            "UNION ALL SELECT layout_updated_at FROM avatars WHERE room_id = ? "
+            "UNION ALL SELECT appearance_updated_at FROM avatars WHERE room_id = ?"
+            ")",
+            (meta["room_id"], meta["room_id"], meta["room_id"]),
         )
         try:
             latest_row = await cursor.fetchone()
@@ -205,12 +239,26 @@ async def patch_avatars(request: Request, room_id: str) -> JSONResponse:
 
             # 编辑者送来的 layout 一律不看（不是报错，是根本不写）
             layout: dict[str, Any] | None = None
+            appearance: dict[str, Any] = {}
             if is_admin and "layout" in update:
-                layout = normalize_layout_patch(update["layout"], settings)
-                if layout is None:
+                parsed = normalize_layout_patch(update["layout"], settings)
+                if parsed is None:
                     results.append({"id": layer_id, "ok": False, "error": "invalid-layout"})
                     continue
+                # 旧客户端会把 overlay/flipH 塞在 layout 里：那两个键归外观域，
+                # 推进的也是 appearance_updated_at —— 布局戳不该为一次翻转动弹。
+                layout, legacy_appearance = split_layout_domains(parsed)
+                appearance.update(legacy_appearance)
+            if "appearance" in update:
+                # 显式 appearance 写在 layout 之后：同一条 update 两个地方都带了同一个键时，
+                # 以意图更明确的 appearance 为准，而不是看字典的插入顺序。
+                parsed = normalize_appearance_patch(update["appearance"])
+                if parsed is None:
+                    results.append({"id": layer_id, "ok": False, "error": "invalid-appearance"})
+                    continue
+                appearance.update(parsed)
             has_layout = bool(layout)
+            has_appearance = bool(appearance)
 
             skin: dict[str, Any] | None = None
             if "skin" in update:
@@ -221,20 +269,30 @@ async def patch_avatars(request: Request, room_id: str) -> JSONResponse:
                     continue
             has_skin = skin is not None
 
-            if not has_layout and not has_skin:
+            if not has_layout and not has_appearance and not has_skin:
                 # 什么也没改：当成功处理，且不写盘（不推进版本戳，别人的并发凭证不受影响）
                 results.append(
-                    {
-                        "id": layer_id,
-                        "ok": True,
-                        "skinUpdatedAt": row["skin_updated_at"],
-                        "layoutUpdatedAt": row["layout_updated_at"],
-                    }
+                    _ok_result(
+                        layer_id,
+                        row["skin_updated_at"],
+                        row["layout_updated_at"],
+                        row["appearance_updated_at"] or 0,
+                    )
                 )
                 continue
 
             expect_layout = update.get("expectLayoutUpdatedAt")
             if has_layout and _is_number(expect_layout) and expect_layout != row["layout_updated_at"]:
+                results.append({"id": layer_id, "ok": False, "error": "conflict"})
+                continue
+            # 外观有自己的一把凭证：外观推进过之后，拿旧外观戳来改布局不该被判成冲突，
+            # 反过来也一样 —— 两个域就这么各认各的。
+            expect_appearance = update.get("expectAppearanceUpdatedAt")
+            if (
+                has_appearance
+                and _is_number(expect_appearance)
+                and expect_appearance != (row["appearance_updated_at"] or 0)
+            ):
                 results.append({"id": layer_id, "ok": False, "error": "conflict"})
                 continue
             expect_skin = update.get("expectSkinUpdatedAt")
@@ -244,12 +302,23 @@ async def patch_avatars(request: Request, room_id: str) -> JSONResponse:
 
             skin_updated_at = row["skin_updated_at"]
             layout_updated_at = row["layout_updated_at"]
+            appearance_updated_at = row["appearance_updated_at"] or 0
             if has_layout and layout:
                 assignments = ", ".join(f"{LAYOUT_COLUMNS[key]} = ?" for key in layout)
                 values = [_sql_value(value) for value in layout.values()]
                 layout_updated_at = now
                 await conn.execute(
                     f"UPDATE avatars SET {assignments}, layout_updated_at = ? WHERE room_id = ? AND id = ?",
+                    [*values, now, meta["room_id"], layer_id],
+                )
+            if has_appearance:
+                # 单独一条 UPDATE：外观改动绝不推进 layout_updated_at，两者互不牵连
+                assignments = ", ".join(f"{APPEARANCE_COLUMNS[key]} = ?" for key in appearance)
+                values = [_sql_value(value) for value in appearance.values()]
+                appearance_updated_at = now
+                await conn.execute(
+                    f"UPDATE avatars SET {assignments}, appearance_updated_at = ? "
+                    "WHERE room_id = ? AND id = ?",
                     [*values, now, meta["room_id"], layer_id],
                 )
             if has_skin:
@@ -259,12 +328,7 @@ async def patch_avatars(request: Request, room_id: str) -> JSONResponse:
                     (json.dumps(skin, ensure_ascii=False), now, meta["room_id"], layer_id),
                 )
             results.append(
-                {
-                    "id": layer_id,
-                    "ok": True,
-                    "skinUpdatedAt": skin_updated_at,
-                    "layoutUpdatedAt": layout_updated_at,
-                }
+                _ok_result(layer_id, skin_updated_at, layout_updated_at, appearance_updated_at)
             )
 
         # ---- 增：新的一行，id 已被占用就报错，绝不悄悄覆盖别人的行 ----
@@ -281,7 +345,7 @@ async def patch_avatars(request: Request, room_id: str) -> JSONResponse:
                 results.append({"id": layer_id, "ok": False, "error": "invalid"})
                 continue
             await conn.execute(AVATAR_INSERT, avatar_insert_params(meta["room_id"], record, now))
-            results.append({"id": layer_id, "ok": True, "skinUpdatedAt": now, "layoutUpdatedAt": now})
+            results.append(_ok_result(layer_id, now, now, now))
 
         # ---- 删：管理员说了算，不跟版本戳较劲（删不存在的行也当成功，重复提交不会炸）----
         # 放在所有写入之后落地：同一个 id 既在 updates 又在 deletes 时，

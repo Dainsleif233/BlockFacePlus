@@ -2,6 +2,9 @@
 # Copyright 2026 Dainsleif · Apache License 2.0
 #
 # 与前端 preset.ts 共用一套口径：超界一律夹回合法区间，不认识的键一律丢掉。
+#
+# 字段分域：layout（位置/尺寸/可见性…）、appearance（帽子层/水平翻转）、skin 各有一套补丁解析，
+# 因为三者各有各的版本戳：改一个不该把另外两个的并发凭证一起作废。
 # 这里刻意逐行对齐旧实现，包括几个看起来奇怪但被前端依赖的行为：
 #   overlay: raw.overlay !== false（缺省/任何非 false → true）
 #   flipH:   raw.flipH === true（只有真的是 true 才算）
@@ -22,6 +25,7 @@ from typing import Any
 from .config import Settings
 
 __all__ = [
+    "APPEARANCE_KEYS",
     "CONTENT_TYPE_FOR_EXT",
     "EXT_FOR_CONTENT_TYPE",
     "LAYER_ID_RE",
@@ -31,6 +35,7 @@ __all__ = [
     "content_type_for_ext",
     "ext_for_content_type",
     "is_record",
+    "normalize_appearance_patch",
     "normalize_avatar_record",
     "normalize_base_name",
     "normalize_doc_size",
@@ -39,11 +44,15 @@ __all__ = [
     "normalize_skin_record",
     "round_js",
     "sniff_image_type",
+    "split_layout_domains",
     "to_number",
 ]
 
 ROOM_ID_RE = re.compile("^[A-Za-z0-9_-]{6,64}$")
 LAYER_ID_RE = re.compile("^[A-Za-z0-9_-]{1,64}$")
+# 外观域的两个键。它们历史上混在 layout 里，现在单列成域，但仍然要在
+# normalize_layout_patch 里认（旧客户端就是这么发的）。
+APPEARANCE_KEYS = ("overlay", "flipH")
 # 白名单 data URI，防止 javascript: 之类的东西混进 <img src>
 SKIN_DATA_URL_RE = re.compile("^data:image/(png|jpeg|webp);base64,[A-Za-z0-9+/=]*$")
 
@@ -177,11 +186,30 @@ def normalize_skin_record(raw: Any, settings: Settings) -> dict[str, Any] | None
     return skin
 
 
+def _appearance_values(raw: dict[str, Any]) -> dict[str, Any]:
+    """从一条 payload 里取出外观字段的补丁；缺的键不进结果。
+
+    取值口径只在这一处：overlay 非 false 即 true、flipH 只有真的是 true 才算。
+    布局域要认这两个键（旧客户端把它们塞在 layout 里），外观域也要认，
+    两边的判据必须一模一样 —— 同一次改动走哪条路都得落成同一个值。
+    """
+    patch: dict[str, Any] = {}
+    if "overlay" in raw:
+        patch["overlay"] = raw["overlay"] is not False
+    if "flipH" in raw:
+        patch["flipH"] = raw["flipH"] is True
+    return patch
+
+
 def normalize_layout_patch(raw: Any, settings: Settings) -> dict[str, Any] | None:
     """布局字段的**局部**补丁：只认请求里真的带了的键。
 
     缺的键一律不动 —— 这是"换皮肤不会碰到位置、挪位置不会碰到皮肤"的落点。
     返回 None 表示整条不合法；返回空 dict 表示这条什么也不用改。
+
+    overlay / flipH 已经归 appearance 域，这里保留它们是为了「整行 / 旧 payload」的宽容入口：
+    旧客户端会把这两个键塞在 layout 里，删掉就凭空多出一条 invalid-layout。
+    调用方拿到结果后应当用 split_layout_domains 把这两个键交还给外观域。
     """
     if not is_record(raw):
         return None
@@ -198,15 +226,35 @@ def normalize_layout_patch(raw: Any, settings: Settings) -> dict[str, Any] | Non
         patch["rotation"] = round_js(clamp_number(raw["rotation"], -3600, 3600, 0))
     if "opacity" in raw:
         patch["opacity"] = clamp_number(raw["opacity"], 0, 1, 1)
-    if "overlay" in raw:
-        patch["overlay"] = raw["overlay"] is not False
-    if "flipH" in raw:
-        patch["flipH"] = raw["flipH"] is True
+    patch.update(_appearance_values(raw))
     if "visible" in raw:
         patch["visible"] = raw["visible"] is not False
     if "order" in raw:
         patch["order"] = max(0, round_js(clamp_number(raw["order"], 0, 9_007_199_254_740_991, 0)))
     return patch
+
+
+def normalize_appearance_patch(raw: Any) -> dict[str, Any] | None:
+    """外观字段（帽子层/水平翻转）的局部补丁：缺的键一律不动。
+
+    取值走 _appearance_values，与布局域那条兼容入口用的是同一份判据 ——
+    否则同一次改动走 layout 与走 appearance 会得出两个结果。
+    返回 None 表示整条不合法；返回空 dict 表示什么也不用改。
+    """
+    if not is_record(raw):
+        return None
+    return _appearance_values(raw)
+
+
+def split_layout_domains(patch: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """把一条 layout 补丁按 APPEARANCE_KEYS 拆成 (布局, 外观)。
+
+    旧客户端把 overlay/flipH 发在 layout 里，服务端仍然认，但它推进的必须是
+    外观域的版本戳 —— 拆开的唯一理由就是这个，别让两个域共用一个戳。
+    """
+    layout = {key: value for key, value in patch.items() if key not in APPEARANCE_KEYS}
+    appearance = {key: value for key, value in patch.items() if key in APPEARANCE_KEYS}
+    return layout, appearance
 
 
 def normalize_avatar_record(raw: Any, index: int, settings: Settings) -> dict[str, Any] | None:
@@ -219,6 +267,10 @@ def normalize_avatar_record(raw: Any, index: int, settings: Settings) -> dict[st
     layout = normalize_layout_patch(raw, settings)
     if layout is None:
         return None
+    # 整行记录里 overlay/flipH 同样按外观域取值；默认值不变（True / False）。
+    # 这里直接调 _appearance_values 而不是 normalize_appearance_patch：raw 已经过 is_record 检查，
+    # 不需要再判一次「整条是不是对象」。
+    appearance = _appearance_values(raw)
     raw_skin = raw.get("skin")
     if raw_skin is None:
         skin = None
@@ -234,8 +286,8 @@ def normalize_avatar_record(raw: Any, index: int, settings: Settings) -> dict[st
         "size": layout.get("size", 256),
         "rotation": layout.get("rotation", 0),
         "opacity": layout.get("opacity", 1),
-        "overlay": layout.get("overlay", True),
-        "flipH": layout.get("flipH", False),
+        "overlay": appearance.get("overlay", True),
+        "flipH": appearance.get("flipH", False),
         "visible": layout.get("visible", True),
         "order": layout.get("order", index),
         "skin": skin,

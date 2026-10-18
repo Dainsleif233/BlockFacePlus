@@ -35,6 +35,9 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "preview_width": "INTEGER",
         "preview_height": "INTEGER",
     },
+    # 外观域（帽子层/翻转）原来和布局共用一个版本戳，旧行没有这一列。
+    # 补成 0 = 「从未推进过外观」，GET 原样返回，客户端据此把外观基线放在 0 上。
+    "avatars": {"appearance_updated_at": "INTEGER NOT NULL DEFAULT 0"},
 }
 
 
