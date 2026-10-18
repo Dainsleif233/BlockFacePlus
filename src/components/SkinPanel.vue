@@ -20,6 +20,8 @@ import {
   useSkinUrls,
   removeSkin,
   clearUnusedSkins,
+  notify,
+  retryTaintedSkins,
 } from '../stores/editor';
 import SkinThumb from './SkinThumb.vue';
 
@@ -51,6 +53,21 @@ const hasUnusedSkins = computed(() => {
   const activeIds = new Set(editor.layers.map((l) => l.skinId));
   return editor.skins.some((s) => s.origin !== 'builtin' && !activeIds.has(s.id));
 });
+
+/**
+ * 被跨域污染过的素材：图能看见，但导出/提交时浏览器拒绝读像素。
+ * 这类失败多半是代理抖了一下，值得给一个"再试一次"的入口，而不是让用户删掉重加。
+ */
+const taintedCount = computed(() => editor.skins.filter((s) => s.tainted).length);
+
+async function retryTainted(): Promise<void> {
+  if (busy.value) return;
+  const fixed = await retryTaintedSkins();
+  notify(
+    fixed > 0 ? 'success' : 'warn',
+    fixed > 0 ? `已重取 ${fixed} 张皮肤，现在都能导出了` : '重取没成功：检查代理模板，或改用「上传皮肤」',
+  );
+}
 
 function builtinRecord(id: string): (typeof editor.skins)[number] | null {
   return editor.skins.find((s) => s.id === 'builtin-' + id) ?? null;
@@ -314,6 +331,16 @@ async function onImageDrop(event: DragEvent): Promise<void> {
           <h3>已载入</h3>
           <span class="skin-head-meta">
             <span>{{ editor.skins.length }} 张</span>
+            <button
+              v-if="taintedCount > 0"
+              type="button"
+              class="bf-btn bf-btn--sm bf-btn--quiet skin-clean-btn"
+              :disabled="busy"
+              :title="taintedCount + ' 张素材的来源没开跨域，导出与提交会失败；点这里用当前代理模板重新取一遍'"
+              @click="retryTainted"
+            >
+              重取 {{ taintedCount }}
+            </button>
             <button
               v-if="hasUnusedSkins"
               type="button"

@@ -35,10 +35,45 @@ export function normalizeTextureUrl(url: string): string {
   return url.replace(/^http:\/\/textures\.minecraft\.net/i, 'https://textures.minecraft.net');
 }
 
-function applyProxy(template: string, url: string): string {
+export function applyProxy(template: string, url: string): string {
   return template.includes('{url}')
     ? template.replace('{url}', encodeURIComponent(url))
     : `${template}${encodeURIComponent(url)}`;
+}
+
+/**
+ * 代理地址再加一个一次性参数。
+ *
+ * 代理失败有两种：上游真挂了（重试没用），和中间链路抖动（重试就好）。
+ * 后一种实测能占到并发请求的四分之一，而且失败会被浏览器按 URL 记进负缓存 ——
+ * 拿同一个地址立刻重试往往连请求都不发，所以换一个查询参数把缓存键改掉。
+ */
+export function withRetryMarker(url: string): string {
+  const marker = `_bfretry=${Date.now().toString(36)}`;
+  const hashIndex = url.indexOf('#');
+  const head = hashIndex >= 0 ? url.slice(0, hashIndex) : url;
+  const tail = hashIndex >= 0 ? url.slice(hashIndex) : '';
+  return `${head}${head.includes('?') ? '&' : '?'}${marker}${tail}`;
+}
+
+/**
+ * 走代理加载，失败再给一次机会。
+ *
+ * 为什么要重试：代理是第三方公共设施，冷启动和并发场景下 `Failed to fetch` 不是个例
+ * （实测 8 个并发请求里有 2 个这样失败，串行则基本不失败）。
+ * 不重试的代价很具体 —— 第 2 级失败会掉到第 3 级非 CORS 兜底，图能显示、
+ * 但画布被污染，于是这张皮肤再也导不出来、也提交不进房间。
+ */
+async function loadProxied(proxyUrl: string, timeoutMs: number): Promise<HTMLImageElement> {
+  try {
+    return await loadOnce(proxyUrl, true, timeoutMs);
+  } catch (firstError) {
+    try {
+      return await loadOnce(withRetryMarker(proxyUrl), true, timeoutMs);
+    } catch {
+      throw firstError;
+    }
+  }
 }
 
 function loadOnce(url: string, cors: boolean, timeoutMs = 15000): Promise<HTMLImageElement> {
@@ -100,7 +135,7 @@ export async function loadImage(rawUrl: string, options: LoadOptions = {}): Prom
     if (options.proxyTemplate) {
       try {
         const proxied = applyProxy(options.proxyTemplate, url);
-        const element = await loadOnce(proxied, true, timeoutMs);
+        const element = await loadProxied(proxied, timeoutMs);
         return { element, width: element.naturalWidth, height: element.naturalHeight, tainted: false, url: proxied };
       } catch {
         /* 落到下一级 */

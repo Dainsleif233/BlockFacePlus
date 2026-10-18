@@ -9,6 +9,8 @@ import type { LoadedImage } from '../core/sources/imageLoader';
 import {
   addLayer,
   clearUnusedSkins,
+  collectRoomPayload,
+  describeEncodeFailure,
   editor,
   getSkin,
   registerSkin,
@@ -156,5 +158,53 @@ describe('editor store - 新增头像在工作区中心自动缩放摆放', () =
     expect(layer.x).toBe(123);
     expect(layer.y).toBe(456);
     expect(layer.size).toBe(78);
+  });
+});
+
+describe('encode failure reporting', () => {
+  beforeEach(() => {
+    editor.layers = [];
+    editor.selectedId = null;
+    clearUnusedSkins();
+  });
+
+  it('皮肤位图画不出来时，载荷点名是哪个头像、哪张素材', () => {
+    // element 不是真正的图片，drawImage 会抛，正好就是"无法编码"那条路
+    const broken = registerSkin(createMockLoadedImage(), 'mua', 'UpSGE', 'MUA 联合认证', 'skin-broken');
+    const layer = addLayer(broken.id);
+
+    const payload = collectRoomPayload();
+    expect(payload.failedSkins).toBe(1);
+    expect(payload.failedSkinLayers).toHaveLength(1);
+    expect(payload.failedSkinLayers[0].id).toBe(layer.id);
+    expect(payload.failedSkinLayers[0].name).toBe(layer.name);
+    expect(payload.failedSkinLayers[0].skinLabel).toBe('UpSGE');
+  });
+
+  it('全部编码成功时失败列表为空', () => {
+    const payload = collectRoomPayload();
+    expect(payload.failedSkins).toBe(0);
+    expect(payload.failedSkinLayers).toEqual([]);
+  });
+
+  it('污染过的素材在提示里被点名，并给出两条可走的路', () => {
+    const text = describeEncodeFailure([
+      { name: '头像 1', skinLabel: 'UpSGE', tainted: true },
+    ]);
+    expect(text).toContain('头像 1');
+    expect(text).toContain('UpSGE');
+    expect(text).toContain('代理');
+    expect(text).toContain('上传皮肤');
+  });
+
+  it('没被污染（只是编码不出来）时说的是重新载入，不甩锅给跨域', () => {
+    const text = describeEncodeFailure([{ name: '头像 2', skinLabel: 'a.png', tainted: false }]);
+    expect(text).toContain('头像 2');
+    expect(text).toContain('重新载入');
+    expect(text).not.toContain('代理');
+  });
+
+  it('没有失败项时返回空串，调用方可以直接拿来当 if 条件', () => {
+    expect(describeEncodeFailure([])).toBe('');
   });
 });

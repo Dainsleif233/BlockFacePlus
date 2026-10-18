@@ -29,9 +29,12 @@ import * as session from '../core/collab/session';
 import type { PatchItemResult, PatchPayload, RoomAvatarRecord, RoomBaseImage, RoomDoc, RoomInfo, RoomRole } from '../core/collab/types';
 import {
   collectRoomPayload,
+  describeEncodeFailure,
   encodeLayerSkin,
+  getSkin,
   loadRoomDocument,
   notify,
+  retryTaintedSkins,
   setCollabHooks,
   editor,
 } from './editor';
@@ -364,6 +367,21 @@ function reportResults(results: PatchItemResult[], swapped = false): void {
   notify(tone, parts.join('；') || '没有改动需要提交');
 }
 
+/** 把编码失败的图层 id 翻成用户能认出的一组条目（名字 + 素材来源 + 是否被污染） */
+function failedSkinDetails(
+  layerIds: string[],
+): { name: string; skinLabel: string; tainted: boolean }[] {
+  return layerIds.map((layerId) => {
+    const layer = editor.layers.find((item) => item.id === layerId);
+    const texture = getSkin(layer?.skinId ?? null);
+    return {
+      name: layer?.name ?? layerId,
+      skinLabel: texture?.sourceLabel ?? '未载入的皮肤',
+      tainted: texture?.tainted ?? false,
+    };
+  });
+}
+
 /** 编辑者/管理员点"完成"：都是差量提交，区别只在换底图那一步 */
 export async function submitChanges(): Promise<void> {
   if (state.submitting || !state.room || !state.roomId) return;
@@ -377,23 +395,34 @@ export async function submitChanges(): Promise<void> {
     return;
   }
 
-  const patch = buildRoomPatch(baseline.value, layerStates(), (id) => encodeLayerSkin(id));
-  const patchEmpty = patchIsEmpty(patch);
-  // 只换了底图、头像一行没动：差量是空的，但底图那一步照样得做
-  const swapBase = state.role === 'admin' && editor.baseImageId !== baselineBaseId;
-  if (patchEmpty && !swapBase) {
-    notify('info', patch.failedSkins > 0
-      ? `有 ${patch.failedSkins} 个头像的皮肤无法编码（可能是跨域来源），换一张再提交`
-      : '没有改动需要提交');
-    return;
-  }
-  if (patch.failedSkins > 0) {
-    notify('warn', `有 ${patch.failedSkins} 个头像的皮肤无法编码（可能是跨域来源），这次先跳过它们`);
-  }
-
   state.submitting = true;
   let swapped = false;
   try {
+    let patch = buildRoomPatch(baseline.value, layerStates(), (id) => encodeLayerSkin(id));
+    // 只换了底图、头像一行没动：差量是空的，但底图那一步照样得做
+    const swapBase = state.role === 'admin' && editor.baseImageId !== baselineBaseId;
+
+    if (patch.failedSkins > 0) {
+      // 先试着把被污染的素材用代理重取一遍：代理抖动才是主因，重取往往一次就好。
+      // 这比让用户删掉重加快得多，也比直接报"无法编码"诚实 —— 那是结果，不是原因。
+      const fixed = await retryTaintedSkins();
+      if (fixed > 0) {
+        patch = buildRoomPatch(baseline.value, layerStates(), (id) => encodeLayerSkin(id));
+        if (patch.failedSkins === 0) notify('success', `已重取 ${fixed} 张皮肤，现在都能编码了`);
+      }
+      if (patch.failedSkins > 0) {
+        notify('warn', `${describeEncodeFailure(failedSkinDetails(patch.failedSkinLayerIds))}。这次先跳过它们`);
+      }
+    }
+
+    const patchEmpty = patchIsEmpty(patch);
+    if (patchEmpty && !swapBase) {
+      notify(
+        'info',
+        describeEncodeFailure(failedSkinDetails(patch.failedSkinLayerIds)) || '没有改动需要提交',
+      );
+      return;
+    }
     // 换底图：只有管理员，且只动底图那张表（画布尺寸随底图一起走）
     if (swapBase) {
       const payload = collectRoomPayload();
@@ -493,7 +522,7 @@ export async function publishRoom(expiresDays: number): Promise<void> {
   if (publish.step !== 'form' && publish.step !== 'done') return;
   publish.error = '';
 
-  const payload = collectRoomPayload();
+  let payload = collectRoomPayload();
   if (!payload.baseImage || !payload.baseFile) {
     publish.error = '先放一张底图再发布';
     return;
@@ -503,11 +532,26 @@ export async function publishRoom(expiresDays: number): Promise<void> {
     return;
   }
   if (payload.failedSkins > 0) {
-    publish.error = `有 ${payload.failedSkins} 个头像的皮肤无法编码，先换个来源或重新载入`;
+    // 发布是整间房第一次落库，缺一张皮肤就没法发：先重取一次再判死刑。
+    // 重取之后必须重新收载荷，否则发的还是那份带空皮肤的旧对象。
+    const fixed = await retryTaintedSkins();
+    payload = collectRoomPayload();
+    if (payload.failedSkins > 0) {
+      publish.error = describeEncodeFailure(payload.failedSkinLayers);
+      return;
+    }
+    if (fixed > 0) notify('success', `已重取 ${fixed} 张皮肤，现在都能编码了`);
+  }
+
+  // 重新取一份窄化后的引用：上面给 payload 重新赋值过，TS 不会把旧判断带过来
+  const baseFile = payload.baseFile;
+  const baseImage = payload.baseImage;
+  if (!baseImage || !baseFile) {
+    publish.error = '先放一张底图再发布';
     return;
   }
 
-  const tooLarge = baseTooLarge(payload.baseFile);
+  const tooLarge = baseTooLarge(baseFile);
   if (tooLarge) {
     publish.error = tooLarge;
     return;
@@ -515,7 +559,7 @@ export async function publishRoom(expiresDays: number): Promise<void> {
 
   // 建房是唯一一次真的把整间房发过去（一间全新的房），体积超了服务端只会回 413，这里提前说清楚
   const oversize = fullSubmitTooLarge({
-    baseImage: payload.baseImage,
+    baseImage,
     layers: payload.layers,
     expiresDays,
   });
@@ -527,7 +571,7 @@ export async function publishRoom(expiresDays: number): Promise<void> {
   publish.step = 'creating';
   try {
     const created = await collabApi.createRoom({
-      baseImage: payload.baseImage,
+      baseImage,
       layers: payload.layers,
       expiresDays,
     });
@@ -535,7 +579,7 @@ export async function publishRoom(expiresDays: number): Promise<void> {
     publish.step = 'uploading';
     // 底图这一步失败就不再回滚房间：它还是 draft，后端会按 BF_DRAFT_TTL_SECONDS 收走，
     // 用户重试一次是全新的房间，比删掉一个可能已经传了一半的房间干净
-    await sendBaseImage(created.roomId, created.editPassword, payload.baseFile, payload.baseImage);
+    await sendBaseImage(created.roomId, created.editPassword, baseFile, baseImage);
 
     // 房主本人进房要拿管理员权限：会话里存管理员密码；编辑密码只展示给成员，不落会话
     session.saveRoomPassword(created.roomId, created.adminPassword);

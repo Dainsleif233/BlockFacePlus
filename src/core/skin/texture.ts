@@ -95,6 +95,12 @@ export interface SkinTexture {
   sourceLabel: string;
   /** 画布是否被跨域污染（污染后无法导出 PNG） */
   tainted: boolean;
+  /**
+   * 当初取图用的地址（可能是代理地址）。只有被污染时才用得上：
+   * 代理偶尔抖动就会掉到非 CORS 兜底，留着地址才谈得上"用代理再取一次"。
+   * 本地文件（blob:）在载入后立刻 revoke，不记进来。
+   */
+  sourceUrl?: string;
 }
 
 export function describeCustomImage(width: number, height: number): SkinMeta {

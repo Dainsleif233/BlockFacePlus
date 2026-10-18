@@ -106,6 +106,8 @@ describe('buildRoomPatch', () => {
     const after = state({ x: 50, skinId: 'skin-b' });
     const patch = buildRoomPatch(new Map([['srv-1', baselineOf(before)]]), [after], () => null);
     expect(patch.failedSkins).toBe(1);
+    // 只给数量用户无从下手，得能指认是哪个图层
+    expect(patch.failedSkinLayerIds).toEqual(['srv-1']);
     expect(patch.updates[0].layout).toEqual({ x: 50 });
     expect(patch.updates[0].skin).toBeUndefined();
   });
@@ -114,6 +116,25 @@ describe('buildRoomPatch', () => {
     const patch = buildRoomPatch(new Map(), [state({ id: 'layer-new' })], () => null);
     expect(patch.adds).toHaveLength(0);
     expect(patch.failedSkins).toBe(1);
+    expect(patch.failedSkinLayerIds).toEqual(['layer-new']);
+  });
+
+  it('多个图层编码失败时逐个记下 id，顺序与画布一致', () => {
+    const before = state({ id: 'srv-1' });
+    const patch = buildRoomPatch(
+      new Map([['srv-1', baselineOf(before)]]),
+      [state({ id: 'srv-1', skinId: 'skin-b' }), state({ id: 'srv-2', skinId: 'skin-c' })],
+      () => null,
+    );
+    expect(patch.failedSkins).toBe(2);
+    expect(patch.failedSkinLayerIds).toEqual(['srv-1', 'srv-2']);
+  });
+
+  it('全部编码成功时 failedSkinLayerIds 是空数组，不是 undefined', () => {
+    const layer = state();
+    const patch = buildRoomPatch(new Map([['srv-1', baselineOf(layer)]]), [layer], () => skin('A'));
+    expect(patch.failedSkins).toBe(0);
+    expect(patch.failedSkinLayerIds).toEqual([]);
   });
 });
 

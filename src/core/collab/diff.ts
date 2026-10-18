@@ -42,6 +42,11 @@ export interface RoomPatch {
   deletes: string[];
   /** 皮肤编码失败（跨域污染之类）的头像数：其余字段照常提交，这几个留作待提交 */
   failedSkins: number;
+  /**
+   * 编码失败的图层 id，与 failedSkins 同源、只是留下的信息更多。
+   * 只说"有 1 个头像无法编码"用户无从下手：得能指认是哪一个、为什么、该怎么办。
+   */
+  failedSkinLayerIds: string[];
 }
 
 function layoutDiff(before: LayerState, after: LayerState): LayoutPatch {
@@ -91,8 +96,14 @@ export function buildRoomPatch(
   current: LayerState[],
   encodeSkin: (layerId: string) => PresetSkin | null,
 ): RoomPatch {
-  const patch: RoomPatch = { updates: [], adds: [], deletes: [], failedSkins: 0 };
+  const patch: RoomPatch = { updates: [], adds: [], deletes: [], failedSkins: 0, failedSkinLayerIds: [] };
   const seen = new Set<string>();
+
+  /** 记一次编码失败：计数与 id 必须同时更新，否则两处信息会对不上 */
+  const noteFailedSkin = (layerId: string): void => {
+    patch.failedSkins += 1;
+    patch.failedSkinLayerIds.push(layerId);
+  };
 
   for (const layer of current) {
     seen.add(layer.id);
@@ -100,7 +111,7 @@ export function buildRoomPatch(
     if (!base) {
       // 新增的行：整行发过去（皮肤必须给，给不出来这条就留着下次）
       const skin = encodeSkin(layer.id);
-      if (!skin) { patch.failedSkins += 1; continue; }
+      if (!skin) { noteFailedSkin(layer.id); continue; }
       patch.adds.push({ ...layer, skin } as RoomAvatarDraft);
       continue;
     }
@@ -112,7 +123,7 @@ export function buildRoomPatch(
     }
     if (base.state.skinId !== layer.skinId) {
       const skin = encodeSkin(layer.id);
-      if (!skin) patch.failedSkins += 1;
+      if (!skin) noteFailedSkin(layer.id);
       else {
         update.skin = skin;
         update.expectSkinUpdatedAt = base.skinUpdatedAt;

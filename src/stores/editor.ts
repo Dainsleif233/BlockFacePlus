@@ -546,6 +546,8 @@ function registerSkin(
     origin,
     sourceLabel,
     tainted: loaded.tainted,
+    // blob: 地址在载入后立刻 revoke，留着只会指向一张不存在的图
+    sourceUrl: loaded.url.startsWith('blob:') ? undefined : loaded.url,
   };
   skins.set(skinId, texture);
 
@@ -1416,6 +1418,67 @@ export function encodeLayerSkin(layerId: string): PresetSkin | null {
   return createPresetSkin({ ...encoded, isCustomImage: skin.meta.isCustomImage === true });
 }
 
+/**
+ * 把"皮肤编码失败"翻译成用户能动手的句子。
+ *
+ * 这件事的因果链对用户是完全不可见的：画布被一张没有 CORS 头的图污染过，
+ * 浏览器出于安全拒绝 toDataURL，于是这个头像既导不出去、也提交不进房间。
+ * 但界面上它明明画得好好的 —— 所以必须点名是哪张图、说明它为什么特殊、
+ * 再给出两条能走通的路，否则用户只能一张张试。
+ */
+export function describeEncodeFailure(
+  failed: { name: string; skinLabel: string; tainted: boolean }[],
+): string {
+  if (failed.length === 0) return '';
+  const names = failed.map((item) => `「${item.name}」（${item.skinLabel}）`).join('、');
+  const anyTainted = failed.some((item) => item.tainted);
+  return anyTainted
+    ? `有 ${failed.length} 个头像的皮肤取不到干净的图：${names}。这些来源没有开放跨域，画布已被污染，浏览器拒绝导出与提交。填好可用的代理模板后点「重取」再试，或改用「上传皮肤」`
+    : `有 ${failed.length} 个头像的皮肤无法编码：${names}。请重新载入这些皮肤的图片后再提交`;
+}
+
+/**
+ * 用代理重取一遍被污染的素材。
+ *
+ * 代理抖动是这次失败最常见的成因：第 2 级失败后 loadImage 会掉到第 3 级非 CORS 兜底，
+ * 于是同一张图"刚才还能显示、现在却提交不了"。重取比让用户删掉重加快得多。
+ * 返回成功换上干净图的张数；不改动画布布局，只换同一个 skinId 背后的位图。
+ */
+export async function retryTaintedSkins(): Promise<number> {
+  const targets = Array.from(skins.values()).filter((skin) => skin.tainted && skin.sourceUrl);
+  if (targets.length === 0) return 0;
+  state.busy = '重取皮肤';
+  let fixed = 0;
+  try {
+    for (const skin of targets) {
+      try {
+        const loaded = await loadImage(skin.sourceUrl as string, { proxyTemplate: state.proxyTemplate });
+        if (loaded.tainted) continue;
+        // 同一个 id 原地换图：图层、历史记录、协同一律不受影响。
+        // provider / 自定义图 / 正脸双层这些登记时的属性要原样带回去，否则素材会变样。
+        const record = state.skins.find((item) => item.id === skin.id);
+        headCache.evictSkin(skin.id);
+        registerSkin(
+          loaded,
+          skin.origin,
+          skin.sourceLabel,
+          record?.provider ?? '',
+          skin.id,
+          false,
+          skin.meta.isCustomImage === true,
+          skin.meta.frontOnly,
+        );
+        fixed += 1;
+      } catch {
+        /* 单张失败就跳过，交给上层按剩余数量提示 */
+      }
+    }
+  } finally {
+    state.busy = null;
+  }
+  return fixed;
+}
+
 /** 发布 / 管理员全量提交：把当前画布整理成房间协议载荷 */
 export function collectRoomPayload(): {
   baseFile: File | null;
@@ -1436,6 +1499,11 @@ export function collectRoomPayload(): {
     skin: PresetSkin | null;
   }[];
   failedSkins: number;
+  /**
+   * 编码失败的头像。只给数量没法让用户动手 —— 得能点名是哪个、卡在什么地方。
+   * skinLabel 取素材的来源描述（玩家名 / 文件名 / 角色名），对用户才是可辨认的。
+   */
+  failedSkinLayers: { id: string; name: string; skinLabel: string; tainted: boolean }[];
 } {
   const baseFile = state.baseImageId ? baseFiles.get(state.baseImageId) ?? null : null;
   const baseImage = state.baseImage
@@ -1447,9 +1515,19 @@ export function collectRoomPayload(): {
       }
     : null;
   let failedSkins = 0;
+  const failedSkinLayers: { id: string; name: string; skinLabel: string; tainted: boolean }[] = [];
   const layers = state.layers.map((layer, index) => {
     const skin = encodeLayerSkin(layer.id);
-    if (!skin) failedSkins += 1;
+    if (!skin) {
+      failedSkins += 1;
+      const texture = getSkin(layer.skinId);
+      failedSkinLayers.push({
+        id: layer.id,
+        name: layer.name,
+        skinLabel: texture?.sourceLabel ?? '未载入的皮肤',
+        tainted: texture?.tainted ?? false,
+      });
+    }
     return {
       id: layer.id,
       name: layer.name,
@@ -1465,7 +1543,7 @@ export function collectRoomPayload(): {
       skin,
     };
   });
-  return { baseFile, doc: { ...state.document }, baseImage, layers, failedSkins };
+  return { baseFile, doc: { ...state.document }, baseImage, layers, failedSkins, failedSkinLayers };
 }
 
 /* ------------------------------------------------------------------ *
