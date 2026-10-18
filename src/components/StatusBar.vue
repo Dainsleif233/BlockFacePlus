@@ -38,7 +38,7 @@ const skinLabel = computed(() => {
       <span class="st"><i class="st-sq" aria-hidden="true" />画布 <b>{{ editor.document.width }} × {{ editor.document.height }} px</b></span>
       <span class="st">
         底图 <b>{{ baseLabel }}</b>
-        <em v-if="basePreview" class="st-tag" title="非管理员只拿到服务器缩小的预览图，导出也是这个清晰度">预览</em>
+        <em v-if="basePreview" class="st-tag" title="当前为预览图，原图请找管理员导出">预览</em>
       </span>
       <span class="st">头像 <b>{{ editor.layers.length }}</b> 个</span>
       <span class="st">皮肤 <b>{{ skinLabel }}</b></span>

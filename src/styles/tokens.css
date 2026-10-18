@@ -345,6 +345,7 @@ h1, h2, h3, p { margin: 0; }
 }
 .bf-chip--m { font-family: var(--bf-mono); }
 .bf-chip--dark { background: transparent; color: var(--bf-paper); border: 1px solid var(--bf-paper); }
+.bf-chip--gold { background: var(--bf-gold); color: var(--bf-ink); border: 1px solid var(--bf-ink); }
 .bf-chip-sq { width: 8px; height: 8px; background: var(--bf-ink); flex: none; }
 .bf-chip-sq--grass { background: var(--bf-grass); }
 .bf-chip-sq--gold { background: var(--bf-gold); }

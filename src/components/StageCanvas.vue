@@ -774,6 +774,15 @@ defineExpose({ schedule });
   <section class="stage">
     <div class="stage__head">
       <span class="bf-chip bf-chip--m bf-chip--hide-mobile"><i class="bf-chip-sq" aria-hidden="true" />底图 {{ baseChip }}</span>
+      <span
+        v-if="basePreview"
+        class="bf-chip bf-chip--gold"
+        role="status"
+        title="当前为预览图，原图请找管理员导出"
+      >
+        <i class="bf-chip-sq" aria-hidden="true" />
+        <b>预览图</b>
+      </span>
       <span class="bf-chip bf-chip--m">显示 {{ zoomPercent }}%</span>
       <span class="bf-chip bf-chip--hide-mobile">
         <i class="bf-chip-sq bf-chip-sq--grass" aria-hidden="true" />
@@ -788,12 +797,6 @@ defineExpose({ schedule });
           <i class="bf-ic bf-ic--plus" aria-hidden="true"><b /><b /></i>
         </button>
       </span>
-    </div>
-
-    <div v-if="basePreview" class="stage__preview" role="status">
-      <i class="stage__preview-sq" aria-hidden="true" />
-      <b>预览底图</b>
-      <span>清晰度低于原图，导出同样是这个清晰度</span>
     </div>
 
     <div
@@ -893,32 +896,7 @@ defineExpose({ schedule });
 
 .stage__zoombar { margin-left: auto; display: flex; align-items: center; gap: 8px; }
 
-/* 预览底图横条：白底压在深色画布上，黄金 4px 色条 = 语义里的「提醒」，
-   与状态栏那行 12px 小字是两个层次 —— 这里要的是抬起头就看见。 */
-.stage__preview {
-  position: relative;
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 34px;
-  padding: 0 12px 0 16px;
-  background: var(--bf-white);
-  color: var(--bf-ink);
-  font-size: var(--bf-font-size-ui);
-}
-.stage__preview::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 4px;
-  background: var(--bf-gold);
-}
-.stage__preview-sq { flex: none; width: 8px; height: 8px; background: var(--bf-gold); }
-.stage__preview b { font-weight: 700; flex: none; }
-.stage__preview span { font-size: var(--bf-font-size-sm); color: var(--bf-ink2); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 
 .stage__body {
   flex: 1 1 auto;
