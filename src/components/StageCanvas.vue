@@ -3,7 +3,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import type { AvatarLayer, HandleName } from '../core/model/types';
 import { wheelRotation, wheelZoomFactor, zoomViewAt } from '../core/model/gesture';
-import { locked as collabLocked } from '../stores/collab';
+import { collab, locked as collabLocked } from '../stores/collab';
 import {
   allHandlePositions,
   clampLayerToDocument,
@@ -120,6 +120,13 @@ const isCustomSelected = computed(() => {
 const baseChip = computed(() =>
   editor.baseImage ? editor.baseImage.width + ' × ' + editor.baseImage.height : '未设置（导出透明底）',
 );
+
+/**
+ * 非管理员拿到的底图是服务器发的**预览版**（长边上限由后端 BF_BASE_PREVIEW_MAX_EDGE 决定）。
+ * 这不只是"看着糊一点"：导出与复制走的是同一张贴图，出图也是这个清晰度。
+ * 状态栏那行小字没人会注意，出图之后才发现细节糊了才是真难受 —— 所以画布正上方挂一条常驻横条。
+ */
+const basePreview = computed(() => collab.basePreview);
 
 const dpr = () => Math.min(window.devicePixelRatio || 1, 2);
 
@@ -783,6 +790,12 @@ defineExpose({ schedule });
       </span>
     </div>
 
+    <div v-if="basePreview" class="stage__preview" role="status">
+      <i class="stage__preview-sq" aria-hidden="true" />
+      <b>预览底图</b>
+      <span>清晰度低于原图，导出同样是这个清晰度</span>
+    </div>
+
     <div
       ref="wrap"
       class="stage__body"
@@ -879,6 +892,33 @@ defineExpose({ schedule });
 .stage__foot { flex: none; display: flex; align-items: center; gap: 8px; }
 
 .stage__zoombar { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+
+/* 预览底图横条：白底压在深色画布上，黄金 4px 色条 = 语义里的「提醒」，
+   与状态栏那行 12px 小字是两个层次 —— 这里要的是抬起头就看见。 */
+.stage__preview {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 12px 0 16px;
+  background: var(--bf-white);
+  color: var(--bf-ink);
+  font-size: var(--bf-font-size-ui);
+}
+.stage__preview::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: var(--bf-gold);
+}
+.stage__preview-sq { flex: none; width: 8px; height: 8px; background: var(--bf-gold); }
+.stage__preview b { font-weight: 700; flex: none; }
+.stage__preview span { font-size: var(--bf-font-size-sm); color: var(--bf-ink2); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .stage__body {
   flex: 1 1 auto;

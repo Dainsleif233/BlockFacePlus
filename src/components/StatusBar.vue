@@ -10,11 +10,12 @@ const zoomLabel = computed(() =>
 const activeRecord = computed(() => editor.skins.find((s) => s.id === editor.activeSkinId) ?? null);
 const baseLabel = computed(() => {
   if (!editor.baseImage) return '未设置';
-  const size = editor.baseImage.width + ' × ' + editor.baseImage.height;
   // 尺寸永远是原图尺寸（= 画布坐标空间）；预览只影响清晰度，
   // 但用户有权知道自己看到的不是原始像素 —— 导出/换图仍以管理员为准。
-  return collab.basePreview ? size + ' · 预览' : size;
+  return editor.baseImage.width + ' × ' + editor.baseImage.height;
 });
+/** 预览底图单独挂一个金色徽标，而不是把「· 预览」塞在尺寸后面当注脚 */
+const basePreview = computed(() => collab.basePreview);
 /**
  * 这句是隐私声明，不是装饰：离线时图片确实一步都没出浏览器，
  * 但进了房间，底图与每一张皮肤都已经存在服务器上了。房间模式下继续挂
@@ -35,7 +36,10 @@ const skinLabel = computed(() => {
     <!-- 桌面端状态栏 -->
     <div class="st-desktop">
       <span class="st"><i class="st-sq" aria-hidden="true" />画布 <b>{{ editor.document.width }} × {{ editor.document.height }} px</b></span>
-      <span class="st">底图 <b>{{ baseLabel }}</b></span>
+      <span class="st">
+        底图 <b>{{ baseLabel }}</b>
+        <em v-if="basePreview" class="st-tag" title="非管理员只拿到服务器缩小的预览图，导出也是这个清晰度">预览</em>
+      </span>
       <span class="st">头像 <b>{{ editor.layers.length }}</b> 个</span>
       <span class="st">皮肤 <b>{{ skinLabel }}</b></span>
       <span class="st">缩放 <b>{{ zoomLabel }}</b></span>
@@ -107,6 +111,18 @@ const skinLabel = computed(() => {
 .st { display: flex; align-items: center; gap: 6px; flex: none; }
 .st b { font-family: var(--bf-mono); color: var(--bf-ink); font-weight: 700; }
 .st-sq { width: 8px; height: 8px; background: var(--bf-ink); flex: none; }
+/* 预览徽标：黄金底 + 墨字（对比度 8.9:1），和"只在颜色上做区分"的规矩配合文字一起用 */
+.st-tag {
+  flex: none;
+  height: 18px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  background: var(--bf-gold);
+  color: var(--bf-ink);
+  font: 700 var(--bf-font-size-sm) / 1 var(--bf-sans);
+  font-style: normal;
+}
 .st-right { margin-left: auto; display: flex; align-items: center; gap: 10px; flex: none; }
 .beat { display: flex; align-items: center; gap: 3px; height: 14px; }
 .beat i { display: block; width: 8px; height: 8px; background: var(--bf-ink); }
