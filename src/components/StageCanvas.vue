@@ -3,7 +3,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import type { AvatarLayer, HandleName } from '../core/model/types';
 import { wheelRotation, wheelZoomFactor, zoomViewAt } from '../core/model/gesture';
-import { collab, locked as collabLocked } from '../stores/collab';
+import { appearanceLocked, collab, locked as collabLocked } from '../stores/collab';
 import {
   allHandlePositions,
   clampLayerToDocument,
@@ -38,7 +38,7 @@ import {
   selectLayer,
   setMobilePanel,
   setViewportSize,
-  updateLayer,
+  updateAppearance,
 } from '../stores/editor';
 
 /** 旋转手柄离顶边的屏幕距离 */
@@ -652,13 +652,13 @@ function fit(): void {
 function toggleFlip(): void {
   const l = selected.value;
   if (!l) return;
-  updateLayer(l.id, { flipH: !l.flipH });
+  updateAppearance(l.id, { flipH: !l.flipH });
 }
 
 function toggleOverlay(): void {
   const l = selected.value;
   if (!l) return;
-  updateLayer(l.id, { overlay: !l.overlay });
+  updateAppearance(l.id, { overlay: !l.overlay });
 }
 
 function duplicateSelected(): void {
@@ -835,11 +835,11 @@ defineExpose({ schedule });
         @pointerup.stop
         @pointercancel.stop
       >
-        <button v-if="!collabLocked" class="m-act-btn" type="button" title="水平翻转" @click.stop="toggleFlip">
+        <button v-if="!appearanceLocked" class="m-act-btn" type="button" title="水平翻转" @click.stop="toggleFlip">
           <span>翻转</span>
         </button>
         <button
-          v-if="!isCustomSelected && !collabLocked"
+          v-if="!isCustomSelected && !appearanceLocked"
           class="m-act-btn"
           :class="{ 'is-active': selected.overlay }"
           type="button"
@@ -867,7 +867,13 @@ defineExpose({ schedule });
 
     <div class="stage__foot">
       <span v-if="!collabLocked" class="bf-chip bf-chip--dark desktop-only">头像 拖动 · 滚轮缩放 · Shift+滚轮旋转</span>
-      <span v-else class="bf-chip bf-chip--dark desktop-only">布局已锁定 · 左侧选皮肤给选中的头像换装</span>
+      <!-- 布局锁与外观锁是两回事：这台服务器认不认识外观域决定后半句该不该写，
+           写了会让用户去找上面根本没显示出来的两个按钮 -->
+      <span v-else class="bf-chip bf-chip--dark desktop-only">{{
+        appearanceLocked
+          ? '布局已锁定 · 可换内容，位置与数量由发起者固定'
+          : '布局已锁定 · 可换内容 / 切帽子层 / 水平翻转，位置与数量由发起者固定'
+      }}</span>
       <span class="bf-chip bf-chip--dark desktop-only">画布 拖动平移 · 滚轮缩放 · 适应窗口复位</span>
       <span class="bf-chip bf-chip--dark mobile-only">单指拖动画布 · 双指缩放</span>
     </div>

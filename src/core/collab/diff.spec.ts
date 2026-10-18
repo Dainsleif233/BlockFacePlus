@@ -11,6 +11,7 @@ import {
   buildRoomPatch,
   countPending,
   patchIsEmpty,
+  supportsAppearanceDomain,
   type LayerBaseline,
   type LayerState,
 } from './diff';
@@ -34,8 +35,13 @@ function state(over: Partial<LayerState> = {}): LayerState {
   };
 }
 
-function baselineOf(state_: LayerState, skinUpdatedAt = 1000, layoutUpdatedAt = 2000): LayerBaseline {
-  return { state: state_, skinUpdatedAt, layoutUpdatedAt };
+function baselineOf(
+  state_: LayerState,
+  skinUpdatedAt = 1000,
+  layoutUpdatedAt = 2000,
+  appearanceUpdatedAt = 1500,
+): LayerBaseline {
+  return { state: state_, skinUpdatedAt, layoutUpdatedAt, appearanceUpdatedAt };
 }
 
 const skin = (tag: string): PresetSkin => ({ dataUrl: 'data:image/png;base64,' + tag, width: 16, height: 8 });
@@ -75,6 +81,70 @@ describe('buildRoomPatch', () => {
     const patch = buildRoomPatch(new Map([['srv-1', baselineOf(before)]]), [after], () => skin('B'));
     expect(patch.updates[0].expectLayoutUpdatedAt).toBe(2000);
     expect(patch.updates[0].expectSkinUpdatedAt).toBe(1000);
+  });
+
+  it('只翻帽子层时只带 appearance 与外观版本戳，布局一个键都不带', () => {
+    const before = state();
+    const after = state({ overlay: false });
+    const patch = buildRoomPatch(new Map([['srv-1', baselineOf(before)]]), [after], () => skin('A'));
+    expect(patch.updates).toHaveLength(1);
+    expect(Object.keys(patch.updates[0]).sort()).toEqual(['appearance', 'expectAppearanceUpdatedAt', 'id']);
+    expect(patch.updates[0].appearance).toEqual({ overlay: false });
+    expect(patch.updates[0].expectAppearanceUpdatedAt).toBe(1500);
+    // 外观改动绝不能混进布局：编辑者的 layout 会被服务端整条忽略
+    expect(patch.updates[0].layout).toBeUndefined();
+    expect(patch.updates[0].expectLayoutUpdatedAt).toBeUndefined();
+  });
+
+  it('水平翻转也只走外观差量', () => {
+    const before = state();
+    const after = state({ flipH: true });
+    const patch = buildRoomPatch(new Map([['srv-1', baselineOf(before)]]), [after], () => skin('A'));
+    expect(patch.updates[0].appearance).toEqual({ flipH: true });
+    expect(patch.updates[0].expectAppearanceUpdatedAt).toBe(1500);
+    expect(patch.updates[0].layout).toBeUndefined();
+  });
+
+  it('布局与外观同时变时两个并发凭证都带上', () => {
+    const before = state();
+    const after = state({ x: 50, overlay: false, flipH: true });
+    const patch = buildRoomPatch(new Map([['srv-1', baselineOf(before)]]), [after], () => skin('A'));
+    expect(patch.updates[0].layout).toEqual({ x: 50 });
+    expect(patch.updates[0].appearance).toEqual({ overlay: false, flipH: true });
+    expect(patch.updates[0].expectLayoutUpdatedAt).toBe(2000);
+    expect(patch.updates[0].expectAppearanceUpdatedAt).toBe(1500);
+  });
+
+  it('旧后端下只翻帽子层：外观并进 layout，凭证退回 expectLayoutUpdatedAt', () => {
+    const before = state();
+    const after = state({ overlay: false });
+    const patch = buildRoomPatch(
+      new Map([['srv-1', baselineOf(before)]]),
+      [after],
+      () => skin('A'),
+      { legacyAppearance: true },
+    );
+    expect(patch.updates).toHaveLength(1);
+    expect(patch.updates[0].layout).toEqual({ overlay: false });
+    expect(patch.updates[0].expectLayoutUpdatedAt).toBe(2000);
+    // 老后端不认 appearance / expectAppearanceUpdatedAt：一个键都不能带
+    expect(patch.updates[0].appearance).toBeUndefined();
+    expect(patch.updates[0].expectAppearanceUpdatedAt).toBeUndefined();
+  });
+
+  it('旧后端下同时改位置与翻转：同一个 layout 里两者并存，只带布局凭证', () => {
+    const before = state();
+    const after = state({ x: 50, flipH: true });
+    const patch = buildRoomPatch(
+      new Map([['srv-1', baselineOf(before)]]),
+      [after],
+      () => skin('A'),
+      { legacyAppearance: true },
+    );
+    expect(patch.updates[0].layout).toEqual({ x: 50, flipH: true });
+    expect(patch.updates[0].expectLayoutUpdatedAt).toBe(2000);
+    expect(patch.updates[0].appearance).toBeUndefined();
+    expect(patch.updates[0].expectAppearanceUpdatedAt).toBeUndefined();
   });
 
   it('顺序变化也走布局差量', () => {
@@ -138,6 +208,22 @@ describe('buildRoomPatch', () => {
   });
 });
 
+describe('supportsAppearanceDomain', () => {
+  it('每行都带外观戳才算支持；0 是合法的「从未推进」，不能当成不支持', () => {
+    expect(supportsAppearanceDomain([{ appearanceUpdatedAt: 0 }])).toBe(true);
+    expect(supportsAppearanceDomain([{ appearanceUpdatedAt: 0 }, { appearanceUpdatedAt: 5200 }])).toBe(true);
+  });
+
+  it('老后端不回这个键时判定为不支持，编辑者的开关要退回锁态', () => {
+    expect(supportsAppearanceDomain([{}])).toBe(false);
+    expect(supportsAppearanceDomain([{ appearanceUpdatedAt: 7 }, {}])).toBe(false);
+  });
+
+  it('空房间无从判断，按支持处理', () => {
+    expect(supportsAppearanceDomain([])).toBe(true);
+  });
+});
+
 describe('countPending', () => {
   it('对齐基线时为 0，改动一处为 1', () => {
     const layer = state();
@@ -145,6 +231,12 @@ describe('countPending', () => {
     expect(countPending(baseline, [layer])).toBe(0);
     expect(countPending(baseline, [{ ...layer, x: 99 }])).toBe(1);
     expect(countPending(baseline, [{ ...layer, skinId: 'skin-b' }])).toBe(1);
+  });
+
+  it('只翻外观也算一处待提交', () => {
+    const layer = state();
+    const baseline = new Map([['srv-1', baselineOf(layer)]]);
+    expect(countPending(baseline, [{ ...layer, flipH: true }])).toBe(1);
   });
 
   it('撤销回基线就回到 0', () => {
@@ -172,6 +264,31 @@ describe('advanceBaseline', () => {
     advanceBaseline(baseline, [after], patch, [{ id: 'srv-1', ok: true, skinUpdatedAt: 1000, layoutUpdatedAt: 3000 }]);
     expect(baseline.get('srv-1')?.layoutUpdatedAt).toBe(3000);
     expect(countPending(baseline, [after])).toBe(0);
+  });
+
+  it('外观戳独立推进：只提外观时不碰布局戳', () => {
+    const before = state();
+    const after = { ...before, overlay: false };
+    const baseline = new Map([['srv-1', baselineOf(before)]]);
+    const patch = buildRoomPatch(baseline, [after], () => skin('A'));
+    advanceBaseline(baseline, [after], patch, [
+      { id: 'srv-1', ok: true, skinUpdatedAt: 1000, layoutUpdatedAt: 2000, appearanceUpdatedAt: 4000 },
+    ]);
+    expect(baseline.get('srv-1')?.appearanceUpdatedAt).toBe(4000);
+    // 外观的写入不推进布局的那把戳，否则别处挪位置的并发检查会被误伤
+    expect(baseline.get('srv-1')?.layoutUpdatedAt).toBe(2000);
+    expect(countPending(baseline, [after])).toBe(0);
+  });
+
+  it('老后端不回外观戳时保留上一次的值，不清零', () => {
+    const before = state();
+    const after = { ...before, flipH: true };
+    const baseline = new Map([['srv-1', baselineOf(before)]]);
+    const patch = buildRoomPatch(baseline, [after], () => skin('A'));
+    advanceBaseline(baseline, [after], patch, [
+      { id: 'srv-1', ok: true, skinUpdatedAt: 1000, layoutUpdatedAt: 2000 },
+    ]);
+    expect(baseline.get('srv-1')?.appearanceUpdatedAt).toBe(1500);
   });
 
   it('冲突的行原封不动，继续算待提交', () => {

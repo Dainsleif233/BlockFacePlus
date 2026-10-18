@@ -18,9 +18,11 @@ import { deleteBaseEntry, readBaseEntry, writeBaseEntry } from '../core/collab/b
 import { CollabApiError, MAX_BASE_IMAGE_BYTES, chunkBySize, collabApi, formatBytes, fullSubmitTooLarge, mergePatchResults } from '../core/collab/api';
 import {
   advanceBaseline,
+  appearanceDroppedByServer,
   buildRoomPatch,
   countPending,
   patchIsEmpty,
+  supportsAppearanceDomain,
   type LayerBaseline,
   type LayerState,
   type RoomPatch,
@@ -58,6 +60,14 @@ interface CollabState {
    * 只用于给用户一句实话 —— 坐标空间与它无关，永远是快照里的 doc。
    */
   basePreview: boolean;
+  /**
+   * 这台后端认不认识「外观域」（帽子层 / 水平翻转）。
+   *
+   * 前端产物在 Pages、后端在 VPS，两边可能分先后发布。老后端会把 appearance 整条
+   * 静默丢掉（不报错也不生效），于是编辑者点了开关、界面显示"已保存"，刷新后却弹回去 ——
+   * 那比直接锁着更糟。所以进房时按快照判断，认不出就退回锁态，宁可说"暂时不能改"。
+   */
+  appearanceSupported: boolean;
 }
 
 const state = reactive<CollabState>({
@@ -71,10 +81,12 @@ const state = reactive<CollabState>({
   busyLoading: false,
   publishOpen: false,
   basePreview: false,
+  // 离线模式与老房间（0 个头像）都无从判断，先当作支持：真连上老后端时进房会改写它
+  appearanceSupported: true,
 });
 
 /**
- * 进房时的基线：一行头像在该时刻的字段快照 + 服务端给的两个版本戳。
+ * 进房时的基线：一行头像在该时刻的字段快照 + 服务端给的三个版本戳（布局 / 外观 / 皮肤）。
  * 提交时拿它和当前画布比出差量；提交成功后只把成功的那些行推进到新基线。
  * shallowRef 只在整表替换时触发：不在这张表上原地 set，要改一律替换出新 Map。
  */
@@ -82,10 +94,26 @@ const baseline = shallowRef<Map<string, LayerBaseline>>(new Map());
 
 const locked = computed(() => state.mode === 'room' && state.role === 'editor');
 const isAdmin = computed(() => state.mode === 'room' && state.role === 'admin');
+/**
+ * 外观（帽子层 / 水平翻转）的锁：编辑者本来就能改，只有在后端还不认识外观域时才锁。
+ * 和布局锁分开，是因为这两件事的成因不同 —— 布局锁是"发起者定的，谁都不能动"，
+ * 外观锁只是"这台后端还收不下这次修改"。
+ */
+const appearanceLocked = computed(() => locked.value && !state.appearanceSupported);
 /** 待提交数 = 相对基线动过的行数（换肤、挪位置、新增、删除各算一处），撤销回基线即时归零 */
 const dirtyCount = computed(() => countPending(baseline.value, layerStates()));
 
-const LAYOUT_LOCK_MESSAGE = '协同编辑下布局已锁定：位置与数量由发起者固定，只能换头像内容';
+/**
+ * 布局被拦下时给的那句话。
+ *
+ * 不能无条件承诺"还能切帽子层、水平翻转"：这台后端不认识外观域时那两个开关是锁着的
+ * （见 appearanceLocked），照着说等于让用户去找一个根本不存在的按钮。
+ */
+function layoutLockMessage(): string {
+  return state.appearanceSupported
+    ? '协同编辑下布局已锁定：位置与数量由发起者固定；可以换头像内容、切帽子层、水平翻转'
+    : '协同编辑下布局已锁定：位置与数量由发起者固定；可以换头像内容（这台服务器暂不支持改帽子层与翻转）';
+}
 
 /* ------------------------------------------------------------------ *
  * 钩子注册：editor.ts 的守卫在这里落地
@@ -95,7 +123,7 @@ setCollabHooks({
   canMutateLayout(action: string): boolean {
     if (!locked.value) return true;
     void action;
-    notify('warn', LAYOUT_LOCK_MESSAGE);
+    notify('warn', layoutLockMessage());
     return false;
   },
   onSkinApplied(layerId: string): void {
@@ -141,6 +169,8 @@ function captureBaseline(records: RoomAvatarRecord[] = []): void {
       state: layerState,
       skinUpdatedAt: record?.skinUpdatedAt ?? 0,
       layoutUpdatedAt: record?.layoutUpdatedAt ?? 0,
+      // 老后端返回的行里没有这个键，取 0 即可：那时外观本来就是锁着的
+      appearanceUpdatedAt: record?.appearanceUpdatedAt ?? 0,
     });
   }
   baseline.value = next;
@@ -226,6 +256,9 @@ async function enterRoom(password: string): Promise<void> {
     // 装载完画布才有 layerStates 可比：基线必须在 loadRoomDocument 之后建
     captureBaseline(snapshot.avatars);
 
+    // 老后端不认识外观域，GET 里根本不会出现 appearanceUpdatedAt（判据为什么是"键在不在"见 diff.ts）
+    state.appearanceSupported = supportsAppearanceDomain(snapshot.avatars);
+
     session.saveRoomPassword(state.roomId, password);
     state.role = snapshot.role;
     state.room = snapshot.room;
@@ -234,7 +267,12 @@ async function enterRoom(password: string): Promise<void> {
     if (snapshot.role === 'admin') {
       notify('info', '已用管理员密码进入：可以任意修改，完成后记得提交');
     } else {
-      notify('info', '进入协同编辑：布局已锁定，点选头像换内容，完成后提交');
+      notify(
+        'info',
+        state.appearanceSupported
+          ? '进入协同编辑：布局已锁定，可以点选头像换内容、切帽子层、水平翻转，完成后提交'
+          : '进入协同编辑：布局已锁定，点选头像换内容，完成后提交',
+      );
     }
   } catch (error) {
     if (error instanceof CollabApiError) {
@@ -352,13 +390,22 @@ async function sendPatch(password: string, patch: RoomPatch): Promise<PatchItemR
 }
 
 /**
+ * 上一次提交发出去的那整句话（null = 这一轮还没提交过）。
+ *
+ * 只给单测留个读数口。为什么要有它：这类"降级了"的提示必须并进 reportResults 一起发，
+ * 见下面 extra 的说明；所以断言只能读拼好的那一条，不能读 notify 被调了几次。
+ */
+let lastReport: string | null = null;
+
+/**
  * 提交结果汇总成人话（swapped 表示这一次还换了底图）。
  *
- * skipped 是"这一次没救回来、被跳过"的皮肤：必须并进这一条提示里。
- * 分开 notify 会被紧随其后的"已保存 N 处改动"覆盖掉 —— 用户只看到保存了一半，
- * 剩下那个为什么没保存一个字都没有，于是只能再点一次试试。
+ * skipped 是"这一次没救回来、被跳过"的皮肤，extra 是其它必须交代一句的事（比如外观降级）：
+ * 两者都必须并进这一条提示里，不能各自 notify。分开发的话会被紧随其后的
+ * "已保存 N 处改动"覆盖掉 —— 用户只看到保存了一半，剩下那个为什么没保存一个字都没有，
+ * 于是只能再点一次试试。
  */
-function reportResults(results: PatchItemResult[], swapped = false, skipped = ''): void {
+function reportResults(results: PatchItemResult[], swapped = false, skipped = '', extra = ''): void {
   const ok = results.filter((r) => r.ok).length;
   const conflicts = results.filter((r) => r.error === 'conflict').length;
   const missing = results.filter((r) => r.error === 'not-found').length;
@@ -367,11 +414,13 @@ function reportResults(results: PatchItemResult[], swapped = false, skipped = ''
   if (swapped) parts.push('底图已更换');
   if (ok > 0) parts.push(`已保存 ${ok} 处改动`);
   if (skipped) parts.push(skipped);
+  if (extra) parts.push(extra);
   if (conflicts > 0) parts.push(`${conflicts} 处刚被别人改过，仍留着待提交`);
   if (missing > 0) parts.push(`${missing} 个头像在服务器上已被删除，刷新后可对齐`);
   if (failed > 0) parts.push(`${failed} 处提交失败`);
-  const tone = skipped || conflicts || failed || missing ? 'warn' : 'success';
-  notify(tone, parts.join('；') || '没有改动需要提交');
+  const tone = skipped || extra || conflicts || failed || missing ? 'warn' : 'success';
+  lastReport = parts.join('；') || '没有改动需要提交';
+  notify(tone, lastReport);
 }
 
 /** 把编码失败的图层 id 翻成用户能认出的一组条目（名字 + 素材来源 + 是否被污染） */
@@ -404,8 +453,17 @@ export async function submitChanges(): Promise<void> {
 
   state.submitting = true;
   let swapped = false;
+  /**
+   * 后端还不认识外观域时，把外观差量并回 layout 走老协议。
+   *
+   * 编辑者那边靠 appearanceLocked 把开关锁住（点了也没用，不如直说）；
+   * 管理员这边锁不了 —— 布局本来就该随便改，于是改成"用老写法发出去"。
+   * 少了这一步，一前端、一后端的发布窗口里管理员点翻转会被老后端整条忽略，
+   * 界面还回一句"已保存"，等于新前端比老前端还能得少。
+   */
+  const buildOptions = { legacyAppearance: !state.appearanceSupported };
   try {
-    let patch = buildRoomPatch(baseline.value, layerStates(), (id) => encodeLayerSkin(id));
+    let patch = buildRoomPatch(baseline.value, layerStates(), (id) => encodeLayerSkin(id), buildOptions);
     // 只换了底图、头像一行没动：差量是空的，但底图那一步照样得做
     const swapBase = state.role === 'admin' && editor.baseImageId !== baselineBaseId;
 
@@ -422,7 +480,12 @@ export async function submitChanges(): Promise<void> {
       // 这比让用户删掉重加快得多，也比直接报"无法编码"诚实 —— 那是结果，不是原因。
       const fixed = await retryTaintedSkins();
       if (fixed > 0) {
-        patch = buildRoomPatch(baseline.value, layerStates(), (id) => encodeLayerSkin(id));
+        patch = buildRoomPatch(
+          baseline.value,
+          layerStates(),
+          (id) => encodeLayerSkin(id),
+          buildOptions,
+        );
         if (patch.failedSkins === 0) notify('success', `已重取 ${fixed} 张皮肤，现在都能编码了`);
       }
       if (patch.failedSkins > 0) {
@@ -457,11 +520,24 @@ export async function submitChanges(): Promise<void> {
       return;
     }
     const results = await sendPatch(password, patch);
+    /**
+     * 老后端会把 appearance 当未知字段整条丢掉，回执却还是 ok:true —— 得当场发现，
+     * 否则界面说"已保存"、刷新后开关弹回去，比直接锁着更让人不信任。判据见 diff.ts。
+     */
+    const appearanceDropped = appearanceDroppedByServer(patch, results);
+    if (appearanceDropped) state.appearanceSupported = false;
     // 只把成功的行推进到新基线：冲突/失败的原样留着继续算待提交
     const next = new Map(baseline.value);
-    advanceBaseline(next, layerStates(), patch, results);
+    advanceBaseline(next, layerStates(), patch, results, { holdAppearance: appearanceDropped });
     baseline.value = next;
-    reportResults(results, swapped, skippedNote);
+    /**
+     * 这一句必须并进 reportResults，不能单独 notify：紧跟着的"已保存 N 处改动"会把它冲掉。
+     * 说清三件事：这次没存上、为什么、下一次会自动改用老写法 —— 用户不用自己找开关。
+     */
+    const droppedNote = appearanceDropped
+      ? '这台服务器还不支持单独保存帽子层与翻转，这次改动没存上；再点一次「完成」会自动用兼容方式提交'
+      : '';
+    reportResults(results, swapped, skippedNote, droppedNote);
   } catch (error) {
     if (error instanceof CollabApiError && error.status === 413) {
       notify('error', error.message);
@@ -621,5 +697,9 @@ export function enterPublishedRoom(): void {
 
 export const collab = state;
 export const publishState = publish;
-export { dirtyCount, isAdmin, locked };
+/** 单测读数口：上一次提交拼出来的那一整句提示（不单独导出一份文案，保证测的是真实路径） */
+export function lastSubmitReport(): string | null {
+  return lastReport;
+}
+export { appearanceLocked, dirtyCount, isAdmin, locked };
 export type { CollabState };

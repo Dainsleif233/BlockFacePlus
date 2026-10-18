@@ -4,7 +4,7 @@
  * Licensed under the Apache License, Version 2.0
  */
 
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { LoadedImage } from '../core/sources/imageLoader';
 import {
   addLayer,
@@ -17,7 +17,10 @@ import {
   removeLayer,
   removeSkin,
   retryTaintedSkins,
+  setCollabHooks,
   undo,
+  updateAppearance,
+  updateLayer,
 } from './editor';
 
 function createMockLoadedImage(width = 64, height = 64): LoadedImage {
@@ -284,5 +287,61 @@ describe('retryTaintedSkins —— 一次「完成」就要能把皮肤救回来
 
     expect(fixed).toBe(0);
     expect(attempts).toBe(0);
+  });
+});
+
+describe('updateAppearance —— 外观域不经过布局闸口', () => {
+  beforeEach(() => {
+    editor.layers = [];
+    editor.selectedId = null;
+    clearUnusedSkins();
+  });
+
+  afterEach(() => {
+    // 钩子是模块级单例，不摘掉会漏到后面的用例里
+    setCollabHooks(null);
+  });
+
+  it('布局被冻结时外观照改，布局入口依旧被拒', () => {
+    const custom = registerSkin(createMockLoadedImage(), 'upload', '测试皮肤9', '上传', 'skin-appearance-1');
+    const layer = addLayer(custom.id);
+    const asked: string[] = [];
+    setCollabHooks({
+      canMutateLayout(action: string): boolean {
+        asked.push(action);
+        return false;
+      },
+      onSkinApplied(): void {},
+      isLayoutFrozen(): boolean {
+        return true;
+      },
+    });
+
+    updateLayer(layer.id, { x: 999 });
+    expect(layer.x).not.toBe(999);
+
+    updateAppearance(layer.id, { overlay: false, flipH: true });
+    expect(layer.overlay).toBe(false);
+    expect(layer.flipH).toBe(true);
+    // 只有布局那一次问过闸口：外观不该被布局锁连带拦住
+    expect(asked).toEqual(['edit']);
+  });
+
+  it('图层不存在时静默返回，不动画布也不抛错', () => {
+    setCollabHooks(null);
+    const before = editor.layers.length;
+    expect(() => updateAppearance('layer-missing', { flipH: true })).not.toThrow();
+    expect(editor.layers).toHaveLength(before);
+  });
+
+  it('外观改动进撤销历史，可以撤回', () => {
+    setCollabHooks(null);
+    const custom = registerSkin(createMockLoadedImage(), 'upload', '测试皮肤10', '上传', 'skin-appearance-2');
+    const layer = addLayer(custom.id);
+    expect(layer.overlay).toBe(true);
+    updateAppearance(layer.id, { overlay: false });
+    expect(editor.layers.find((l) => l.id === layer.id)?.overlay).toBe(false);
+    undo();
+    expect(editor.layers.find((l) => l.id === layer.id)?.overlay).toBe(true);
   });
 });

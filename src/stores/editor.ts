@@ -462,6 +462,26 @@ export function updateLayer(id: string, patch: Partial<AvatarLayer>, record = tr
   if (patch.size !== undefined) layer.size = clampSize(patch.size);
 }
 
+/**
+ * 外观入口：帽子层与水平翻转。
+ *
+ * 单独开一条**不过布局闸口**的路，是因为这两个开关是纯外观，跟位置/尺寸/数量无关。
+ * 协同房间里编辑者被禁改的是布局，不是外观 —— 让他俩共用一个入口，就等于
+ * 「编辑者不能挪头像」顺带把「编辑者不能切帽子层」也冻住了。
+ *
+ * 反过来说，updateLayer 的闸口一个都不能松：编辑者仍然改不了 x/y/size/order/name。
+ */
+export function updateAppearance(
+  id: string,
+  patch: Partial<Pick<AvatarLayer, 'overlay' | 'flipH'>>,
+  record = true,
+): void {
+  const layer = state.layers.find((l) => l.id === id);
+  if (!layer) return;
+  if (record) commit();
+  Object.assign(layer, patch);
+}
+
 /** 滚轮缩放一个头像：以图层中心为锚点按倍率改边长 */
 export function scaleLayerBy(id: string, factor: number): void {
   const layer = state.layers.find((l) => l.id === id);

@@ -2,7 +2,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import { MIN_LAYER_SIZE, type AvatarLayer } from '../core/model/types';
-import { dirtyCount, locked as collabLocked } from '../stores/collab';
+import { appearanceLocked, dirtyCount, locked as collabLocked } from '../stores/collab';
 import {
   addAvatar,
   beginChange,
@@ -19,6 +19,7 @@ import {
   removeLayer,
   selectLayer,
   setMobilePanel,
+  updateAppearance,
   updateLayer,
 } from '../stores/editor';
 import SkinThumb from './SkinThumb.vue';
@@ -166,8 +167,9 @@ function resetTransform(): void {
     size: Math.round(Math.min(editor.document.width, editor.document.height) * 0.4),
     rotation: 0,
     opacity: 1,
-    flipH: false,
   });
+  // 翻转属外观域，走它自己的入口；record 传 false，让这一次「重置」整条只占一格撤销
+  if (layer.value) updateAppearance(layer.value.id, { flipH: false }, false);
 }
 
 function onNameInput(event: Event): void {
@@ -220,7 +222,8 @@ function onNameInput(event: Event): void {
           </span>
         </div>
 
-        <section v-if="!collabLocked" class="bf-sblk bf-sblk--cyan bf-duo">
+        <!-- 外观域：帽子层与水平翻转。编辑者被禁的是布局，这两个开关与位置无关，单独上锁 -->
+        <section v-if="!appearanceLocked" class="bf-sblk bf-sblk--cyan bf-duo">
           <button
             type="button"
             class="bf-tg"
@@ -228,7 +231,7 @@ function onNameInput(event: Event): void {
             :aria-checked="!isCustomImage && layer.overlay"
             :disabled="isCustomImage"
             :title="isCustomImage ? '头像图片无帽子层' : '第二层是官方贴图的一部分：Steve 这层正面是一圈不透明灰，关掉能露出完整正脸'"
-            @click="patch({ overlay: !layer.overlay })"
+            @click="updateAppearance(layer.id, { overlay: !layer.overlay })"
           >
             <span class="bf-tg-track" aria-hidden="true"><i class="bf-tg-knob" /></span>
             <span class="bf-tg-t">帽子层</span>
@@ -239,7 +242,7 @@ function onNameInput(event: Event): void {
             class="bf-tg"
             role="switch"
             :aria-checked="layer.flipH"
-            @click="patch({ flipH: !layer.flipH })"
+            @click="updateAppearance(layer.id, { flipH: !layer.flipH })"
           >
             <span class="bf-tg-track" aria-hidden="true"><i class="bf-tg-knob" /></span>
             <span class="bf-tg-t">水平翻转</span>
@@ -363,12 +366,13 @@ function onNameInput(event: Event): void {
         </ul>
       </section>
 
-      <!-- 协同编辑者：布局冻结，面板只剩「怎么换内容」的指引 -->
+      <!-- 协同编辑者：布局冻结，面板只剩「怎么换内容、怎么调外观」的指引 -->
       <section v-if="collabLocked" class="bf-sblk bf-sblk--cyan">
         <div class="bf-sblk-t"><h3>协同编辑</h3></div>
         <p class="bf-note">
           布局已由发起者锁定：不能挪动、增删头像。点选画布上的一个头像，
-          然后在左侧素材里挑一张皮肤换上；改完点顶栏「完成」提交。
+          然后在左侧素材里挑一张皮肤换上{{ appearanceLocked ? '' : '，上方还能开关帽子层、切换水平翻转' }}；
+          改完点顶栏「完成」提交。
           {{ dirtyCount > 0 ? '（' + dirtyCount + ' 个头像待提交）' : '' }}
         </p>
       </section>
