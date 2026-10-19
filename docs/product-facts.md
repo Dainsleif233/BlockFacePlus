@@ -19,12 +19,14 @@
 3. **本地与直链**：支持用户直接拖拽上传本地 `.png` 文件，或直接提供任意支持跨域的图片直链。
 
 ### 1.3 MUA 联合认证皮肤
-MUA（mualliance.ltd）联合认证皮肤走 `skin.mualliance.ltd/api/union/skin/byname/<name>`，与正版 ID 共用同一套取图管线 `loadImage`：
-- 该站**不返回** `Access-Control-Allow-Origin`（`OPTIONS` 预检也只回 `Allow: GET,HEAD`），所以三级降级里第 1 级（CORS 直取）必然失败、实际依赖第 2 级代理；
-- 代理用的是用户在界面上配置的模板（默认 `images.weserv.nl`），与「网络地址」入口完全同一套，不另造路径；
-- 代理也无法访问时退回第 3 级非 CORS 加载：图能显示、画布被污染，导出前会提示改用「上传皮肤」或换代理；
-- **"显示得出来"与"能编码"是两件事**（详见 §1.4），第 3 级的图能画进画布，但 `toDataURL` 会被浏览器拒绝，于是这张头像提交不进房间；
-- 上游的错误码有语义差别：`404` 表示 Union 里没有这个角色名，`500` 表示该角色所属的成员皮肤站自己挂了（错误页里带具体原因），界面上都只说"没取到"，不臆断成"名字不存在"。
+MUA（mualliance.ltd）联合认证皮肤走 `skin.mualliance.ltd/api/union/skin/byname/<name>`，取图管线是 `loadImage` 的 **`proxyOnly` 模式**，只剩代理那一级：
+- 该站**不返回** `Access-Control-Allow-Origin`（`OPTIONS` 预检也只回 `Allow: GET,HEAD`）；
+- 因此另外两级都已砍掉（2026-10 实测后决定）：
+  - **第 1 级 CORS 直取**对这个站必然失败，只白等一次超时；
+  - **第 3 级非 CORS 兜底**能出图，但画布被污染 → `toDataURL` 必抛 `SecurityError` → 这张头像永远提交不进房间。用户看到的是"图明明加载出来了却存不下来"，比"加载失败，请重试"难懂得多。**没有价值的能力不是能力，是陷阱。**
+- 代理用的是本项目自建的 EdgeOne Makers 端点（`https://api.jsumc.fun/imgproxy?url=`，实现在另一个仓库 `D:\Code\jsucraft\api` 的 `src/imgproxy.ts`），与「网络地址」入口共用同一个模板 `DEFAULT_PROXY_TEMPLATE`（`src/core/sources/proxyTemplate.ts`）；它统一输出 `Access-Control-Allow-Origin: *`，所以这一跳成功就意味着像素可读、画布不被污染。此前用的是第三方公共代理 `images.weserv.nl`；界面上一向没有、现在也没有改模板的入口，`VITE_IMG_PROXY_TEMPLATE` 只能在构建期换（且 `vite.config.ts` 用同一个变量算 img-src，两边必须一致）；代理不通时直接报错，不退化成能看不能存的图；
+- 上游的错误码有语义差别：`404` 表示 Union 里没有这个角色名，`500` 表示该角色所属的成员皮肤站自己挂了（错误页里带具体原因），界面上都只说"没取到"，不臆断成"名字不存在"；
+- 「网络地址」入口仍然走完整的三级降级 —— `proxyOnly` 是 MUA 入口的选择，不是 `loadImage` 的默认行为。
 
 ### 1.4 画布污染与"皮肤无法编码"
 
@@ -38,9 +40,11 @@ MUA（mualliance.ltd）联合认证皮肤走 `skin.mualliance.ltd/api/union/skin
 | 2 | 套代理模板后带 CORS 取 | `tainted: false`，可导出 |
 | 3 | 不带 CORS 兜底（保证"至少看得见"） | **`tainted: true`，导出与提交都会失败** |
 
+这张表描述的是 `loadImage` 的默认行为（「网络地址」「正版 ID」等入口）。**MUA 联合认证入口不走这套**：它传 `proxyOnly: true`，只保留第 2 级 —— 因为对那个站第 1 级必然失败、第 3 级只能换回一张存不下来的图（详见 §1.3）。
+
 因此"有 1 个头像的皮肤无法编码"的用户可见现象，成因永远是**这张素材掉到了第 3 级**。典型触发场景是第 2 级代理抖动：
 
-- 公共代理（如 `images.weserv.nl`）在并发或冷启动时会偶发 `Failed to fetch`（实测 8 个并发里 2 个失败，串行基本不失败）；
+- 代理这一跳在并发或冷启动时会偶发 `Failed to fetch`（旧默认 `images.weserv.nl` 实测 8 个并发里 2 个失败、40 并发时 31/40 超过 8 秒；换成自建端点后 20 并发冷启动 20/20 成功、尾延迟 6.9s）；
 - 失败后浏览器会按 URL 记负缓存，同一地址立刻重试往往连请求都不发 —— 所以重试必须换查询参数；
 - 一次失败就掉级，于是同一张图"刚才还能显示、现在却提交不了"。
 

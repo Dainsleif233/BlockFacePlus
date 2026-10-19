@@ -19,6 +19,7 @@ import {
   suggestFilename,
 } from '../core/render/exportImage';
 import { loadImage, type LoadedImage } from '../core/sources/imageLoader';
+import { DEFAULT_PROXY_TEMPLATE, describeProxyTemplate } from '../core/sources/proxyTemplate';
 import {
   accountCandidatesFor,
   BUILTIN_SKINS,
@@ -103,7 +104,6 @@ interface EditorState {
 }
 
 export const DEFAULT_DOCUMENT = { width: 1280, height: 800 };
-export const DEFAULT_PROXY_TEMPLATE = 'https://images.weserv.nl/?url=';
 
 const state = reactive<EditorState>({
   document: { ...DEFAULT_DOCUMENT },
@@ -770,11 +770,16 @@ export async function useAccountSkin(name: string): Promise<void> {
 /**
  * MUA 联合认证皮肤的上游地址。
  *
- * 和正版 ID 一样是**纯前端直连**：skin.mualliance.ltd 不返回 Access-Control-Allow-Origin，
- * 所以真正的取图交给 loadImage 那套三级降级 —— 先按 CORS 直取，
- * 不行就走用户配置的跨域代理（默认 images.weserv.nl，与「网络地址」入口完全同一套），
- * 再不行退回非 CORS 加载（能看见，但画布被污染、导出前会提示）。
- * 这里不另造一条取图路径：多一条路径就多一份"两边行为不一致"的债。
+ * skin.mualliance.ltd 不返回 Access-Control-Allow-Origin（OPTIONS 预检也只回 Allow: GET,HEAD），
+ * 所以这条链路**只剩代理那一级**：loadImage 的 `proxyOnly` 模式。
+ *
+ * 为什么砍掉另外两级（2026-10 实测）：
+ *  - 第 1 级 CORS 直取对这个站必然失败，白等一次超时；
+ *  - 第 3 级非 CORS 兜底能出图，但画布被污染 → toDataURL 必抛 SecurityError →
+ *    这张头像永远提交不进房间。用户看到的是"图明明加载出来了却存不下来",
+ *    比"加载失败，请重试"难懂得多。没有价值的能力不是能力，是陷阱。
+ * 代理用的是本项目自建的 EdgeOne Makers 端点（core/sources/proxyTemplate.ts），与
+ * 「网络地址」入口同一套模板，只是不再有降级台阶可以掉。
  */
 export function muaSkinUrl(name: string): string {
   return 'https://skin.mualliance.ltd/api/union/skin/byname/' + encodeURIComponent(name);
@@ -784,13 +789,15 @@ async function loadMuaSkin(name: string): Promise<{ loaded: LoadedImage; provide
   const clean = validateMuaName(name);
   let loaded: LoadedImage;
   try {
-    loaded = await loadImage(muaSkinUrl(clean), { proxyTemplate: state.proxyTemplate });
+    // proxyOnly：不做 CORS 直取、也不许掉到非 CORS 兜底 —— 见 muaSkinUrl 上方那段
+    loaded = await loadImage(muaSkinUrl(clean), { proxyTemplate: state.proxyTemplate, proxyOnly: true });
   } catch {
-    // 上游用 404 表示"Union 里没这个 ID"，500 表示"这个角色所属的成员皮肤站自己挂了"。
-    // 走 <img> 加载时两种都只是 onerror，前端分不出来 —— 所以不臆断成"名字不存在"，
-    // 把两种可能都摆出来，用户才知道该改名字还是该等一会儿再试。
+    // 这条路只剩代理一级，所以"取不到"里最该被点名的是代理 —— 说漏了它，
+    // 用户只会反复改 ID。上游那边同样有两种情况：404 = Union 里没这个 ID，
+    // 500 = 这个角色所属的成员皮肤站自己挂了。走 <img> 加载时两种都只是 onerror，
+    // 前端分不出来，所以把三种可能都摆出来，不臆断成"名字不存在"。
     throw new SkinLookupError(
-      `没取到 MUA 联合认证「${clean}」的皮肤：Union 里没有这个 ID，或它所属的皮肤站暂时不可用`,
+      `没取到 MUA 联合认证「${clean}」的皮肤：Union 里没有这个 ID、它所属的皮肤站暂时不可用，或取图代理（${describeProxyTemplate(state.proxyTemplate)}）不通`,
     );
   }
   return { loaded: requireSkin(loaded), provider: MUA_PROVIDER, label: clean };
@@ -803,12 +810,8 @@ export async function useMuaSkin(name: string): Promise<void> {
     const skinId = createId('skin');
     registerSkin(loaded, 'mua', label, MUA_PROVIDER, skinId);
     applySkin(skinId);
-    notify(
-      loaded.tainted ? 'warn' : 'success',
-      loaded.tainted
-        ? `已加载「${label}」（若保存受限请点「重取」或改用本地上传）`
-        : `已加载 MUA 联合认证「${label}」的皮肤`,
-    );
+    // 不再有 tainted 分支：proxyOnly 要么拿到可导出的图，要么在上面抛错
+    notify('success', `已加载 MUA 联合认证「${label}」的皮肤`);
   } catch (error) {
     notify('error', (error as Error).message);
   } finally {

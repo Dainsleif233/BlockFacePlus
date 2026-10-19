@@ -297,10 +297,12 @@ else if (accNotice) skip('正版账号 ID 入口可用', '取不到图，按网�
 else check('正版账号 ID 入口可用', false, accDetail);
 
 // 7d MUA 联合认证 ID：skin.mualliance.ltd 不发 Access-Control-Allow-Origin，
-// 真正取图靠 loadImage 的代理那一级。这里**不走 useMuaSkin**：那个入口会把皮肤套到选中的头像上，
-// 而这一节后面还有逐像素对拍 —— 一旦代理不可用、走的是非 CORS 兜底，画布就被污染，
-// 后面的 getImageData 会全部抛 SecurityError。只验"地址拼对了 + 取图管线通不通"，
-// 不碰 skins / layers / 撤销栈，后面几节的状态才不会被它带坏。
+// 这条链路只有代理那一级（loadImage 的 proxyOnly）—— CORS 直取必然失败、非 CORS 兜底
+// 换来的是无法编码的污染画布，两级都已砍掉，代理不通就直接报错。
+// 代理是项目自建的 EdgeOne Makers 端点（core/sources/proxyTemplate.ts），它输出 ACAO，
+// 所以这一跳成功就意味着像素可读、画布不被污染。
+// 这里**不走 useMuaSkin**：那个入口会把皮肤套到选中的头像上，而这一节后面还有逐像素对拍，
+// 只验"地址拼对了 + 取图管线通不通"，不碰 skins / layers / 撤销栈。
 const muaUrl = store.muaSkinUrl('UpSGE');
 check('MUA 地址拼到 Union 皮肤站',
   muaUrl === 'https://skin.mualliance.ltd/api/union/skin/byname/UpSGE', muaUrl);
@@ -309,15 +311,16 @@ let muaOk = false;
 let muaDetail = '';
 try {
   const { loadImage } = await import('/src/core/sources/imageLoader.ts');
+  // proxyOnly 与真实入口一致：代理不通就抛错，绝不退化成能看不能存的图
   const loaded = await withTimeout(
-    loadImage(muaUrl, { proxyTemplate: editor.proxyTemplate }), 20000, 'MUA 联合认证');
+    loadImage(muaUrl, { proxyTemplate: editor.proxyTemplate, proxyOnly: true }), 20000, 'MUA 联合认证');
   muaOk = loaded.width === 64 && loaded.height === 64 && loaded.tainted === false;
-  muaDetail = loaded.width + '×' + loaded.height + (loaded.tainted ? ' / 非 CORS 兜底（画布会污染）' : ' / 未污染') +
+  muaDetail = loaded.width + '×' + loaded.height + (loaded.tainted ? ' / 竟然退了非 CORS 兜底（画布会污染）' : ' / 未污染') +
     ' / ' + loaded.url.slice(0, 60);
 } catch (e) { muaDetail = String(e && e.message ? e.message : e); }
-// 拿不到、或只能靠非 CORS 兜底拿到，都是"这台机器没走通代理"的网络问题，不该判成产品坏了。
+// 拿不到就是"这台机器没走通代理"的网络问题，不该判成产品坏了。
 if (muaOk) check('MUA 联合认证 ID 可取皮肤且不污染画布', true, muaDetail);
-else if (looksLikeNetwork(muaDetail) || muaDetail.indexOf('非 CORS') >= 0) {
+else if (looksLikeNetwork(muaDetail)) {
   skip('MUA 联合认证 ID 可取皮肤且不污染画布', '代理不可达（该站无 CORS 头），按网络问题跳过：' + muaDetail);
 } else check('MUA 联合认证 ID 可取皮肤且不污染画布', false, muaDetail);
 

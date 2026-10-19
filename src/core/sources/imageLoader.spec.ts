@@ -3,12 +3,12 @@
  * Copyright 2026 Dainsleif
  * Licensed under the Apache License, Version 2.0
  *
- * 只测纯逻辑（代理模板拼址 / 重试标记）。真解码交给浏览器，
+ * 只测纯逻辑（代理模板拼址 / 重试标记 / 哪一级会发请求）。真解码交给浏览器，
  * 由 tools/e2e.js 在真实环境里覆盖。
  */
 
-import { describe, expect, it, vi } from 'vitest';
-import { applyProxy, withRetryMarker } from './imageLoader';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { applyProxy, loadImage, withRetryMarker } from './imageLoader';
 
 describe('applyProxy', () => {
   it('模板里有 {url} 占位符就替换成编码后的地址', () => {
@@ -62,5 +62,85 @@ describe('withRetryMarker', () => {
     expect(withRetryMarker('https://proxy.example/raw#frag')).toMatch(
       /^https:\/\/proxy\.example\/raw\?_bfretry=[a-z0-9]+#frag$/,
     );
+  });
+});
+
+/**
+ * 记录「谁被真的请求了」。loadImage 的每一次尝试都经过 `new Image()`，
+ * 所以把它换掉就能看清走了哪几级 —— 这是断言「砍掉的两级确实不再发请求」的唯一办法。
+ */
+function stubImages(respond: (url: string, cors: boolean) => 'ok' | 'fail') {
+  const attempts: { url: string; cors: boolean }[] = [];
+  class FakeImage {
+    onload: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    naturalWidth = 0;
+    naturalHeight = 0;
+    crossOrigin: string | null = null;
+    private current = '';
+    get src(): string {
+      return this.current;
+    }
+    set src(value: string) {
+      if (!value) return; // loadOnce 超时时会把 src 清空，那次不算请求
+      this.current = value;
+      const cors = this.crossOrigin === 'anonymous';
+      attempts.push({ url: value, cors });
+      const outcome = respond(value, cors);
+      queueMicrotask(() => {
+        if (outcome === 'ok') {
+          this.naturalWidth = 64;
+          this.naturalHeight = 64;
+          this.onload?.();
+        } else {
+          this.onerror?.();
+        }
+      });
+    }
+  }
+  vi.stubGlobal('Image', FakeImage);
+  return attempts;
+}
+
+const MUA_URL = 'https://skin.mualliance.ltd/api/union/skin/byname/UpSGE';
+const PROXY = 'https://api.jsumc.fun/imgproxy?url={url}';
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe('loadImage 的 proxyOnly（MUA 入口用它）', () => {
+  it('只打一次代理，既不 CORS 直取也不掉非 CORS 兜底', async () => {
+    const attempts = stubImages(() => 'ok');
+    const loaded = await loadImage(MUA_URL, { proxyTemplate: PROXY, proxyOnly: true });
+    expect(attempts).toEqual([
+      { url: 'https://api.jsumc.fun/imgproxy?url=' + encodeURIComponent(MUA_URL), cors: true },
+    ]);
+    expect(loaded.tainted).toBe(false);
+    expect(loaded.width).toBe(64);
+  });
+
+  it('代理不通就报错 —— 绝不退化成「能看不能存」的污染图', async () => {
+    const attempts = stubImages(() => 'fail');
+    await expect(loadImage(MUA_URL, { proxyTemplate: PROXY, proxyOnly: true })).rejects.toThrow();
+    // 代理自己重试过一次（第二次换了缓存键），但始终没碰过上游地址
+    expect(attempts).toHaveLength(2);
+    expect(attempts.every((a) => a.url.startsWith('https://api.jsumc.fun/imgproxy'))).toBe(true);
+    expect(attempts[1].url).toContain('_bfretry=');
+  });
+
+  it('没配代理时当场报错，而不是偷偷绕回直取', async () => {
+    const attempts = stubImages(() => 'ok');
+    await expect(loadImage(MUA_URL, { proxyOnly: true })).rejects.toThrow('代理');
+    expect(attempts).toHaveLength(0);
+  });
+
+  it('不传 proxyOnly 时三级降级照旧（这是别的入口的行为，没被牵连）', async () => {
+    // 直取 → 代理 → 代理重试 → 非 CORS 兜底：最后那次才是不要 CORS 的
+    const attempts = stubImages((_url, cors) => (cors ? 'fail' : 'ok'));
+    const loaded = await loadImage('https://a.com/x.png', { proxyTemplate: PROXY });
+    expect(attempts.map((a) => a.cors)).toEqual([true, true, true, false]);
+    expect(attempts[3].url).toBe('https://a.com/x.png');
+    expect(loaded.tainted).toBe(true);
   });
 });

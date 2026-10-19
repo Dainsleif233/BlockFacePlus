@@ -434,6 +434,9 @@ pnpm build
   其中 `connect-src` 需要包含后端 origin —— `vite.config.ts` 会从 `VITE_API_BASE_URL` 自动提取并加上，
   所以**改了后端地址一定要重新构建**，否则产物里的 CSP 还停在旧域名上。
   被 CSP 拦下的表现是控制台明确写出 `Content Security Policy` 字样，和 CORS 报错长得不一样，别混。
+- **取图代理也在 CSP 里**：`img-src` 放行的是取图代理的 origin（默认自建端点 `https://api.jsumc.fun/imgproxy?url={url}`，
+  由 `VITE_IMG_PROXY_TEMPLATE` 在构建期决定）。它和 `connect-src` 是两条独立的规则，别只记得后端那一条：
+  代理被拦下的表现是**头像全都取不回来**（`new Image()` 被 CSP 拒绝），而不是房间进不去。
 - **preflight 是省不掉的**：密码走自定义请求头 `X-BF-Room-Pwd`，跨域时浏览器一定会先发一次 `OPTIONS`。
   不要去反向代理上给 `OPTIONS` 加长时间缓存 —— 这里没有值得省的东西。
 - **别把密码塞进 URL**：契约规定密码只走请求头，既是为了不进反向代理的 access_log，也是为了不留在浏览器历史里。

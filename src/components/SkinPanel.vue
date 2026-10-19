@@ -225,7 +225,7 @@ async function onImageDrop(event: DragEvent): Promise<void> {
 
       <section
         class="bf-sblk bf-sblk--gold"
-        title="MUA 联合认证（mualliance.ltd）：按 ID 从 Union 皮肤站取图；该站不允许本程序直接读取图片，取图会走代理中转"
+        title="MUA 联合认证（mualliance.ltd）：按 ID 从 Union 皮肤站取图；该站不允许本程序直接读取图片，只能经代理中转 —— 代理不通会直接报错，不会给你一张存不下来的图"
       >
         <div
           class="bf-sblk-t"

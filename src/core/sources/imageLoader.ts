@@ -22,11 +22,22 @@ export interface LoadedImage {
 export interface LoadOptions {
   /**
    * 跨域代理模板，`{url}` 会被替换为经过 encodeURIComponent 的原始地址。
-   * 例：`https://images.weserv.nl/?url={url}`
+   * 默认值见 `proxyTemplate.ts`（本项目自建的 EdgeOne Makers 端点）。
+   * 模板必须是**会回 Access-Control-Allow-Origin 的**主机：代理只解决"取不到"，
+   * 不回 CORS 头的话取回来的图照样污染画布，等于白代理一跳。
    */
   proxyTemplate?: string | null;
   /** 是否优先使用 CORS 请求，默认 true */
   cors?: boolean;
+  /**
+   * 只走代理那一级：不做 CORS 直取，也不做非 CORS 兜底。
+   *
+   * 给「上游确定不发 CORS 头」的来源（MUA 联合认证）用。对这类来源，第 1 级必然是
+   * 白等一次超时，第 3 级换来的是"能看不能存"的图（画布被污染，导出与提交都会失败）；
+   * 两级都没有价值，宁可在代理不通时干脆报错，好过交给用户一张注定存不下来的头像。
+   * 开着它时 `cors` 不起作用 —— 那次直取根本不会发。
+   */
+  proxyOnly?: boolean;
   /** 单次加载超时时间（毫秒），默认 15000 */
   timeoutMs?: number;
 }
@@ -124,12 +135,23 @@ function loadOnce(url: string, cors: boolean, timeoutMs = 15000): Promise<HTMLIm
  * 1. 直接以 CORS 方式加载（首选，画布不被污染，可导出）
  * 2. 失败且配置了代理 → 通过代理加载
  * 3. 仍失败 → 退回非 CORS 加载（能看见，但画布被污染，导出前必须提示用户）
+ *
+ * 传 `proxyOnly` 就只剩第 2 级 —— 那是给上游确定没有 CORS 头的来源用的（见 LoadOptions）。
  */
 export async function loadImage(rawUrl: string, options: LoadOptions = {}): Promise<LoadedImage> {
   const url = normalizeTextureUrl(rawUrl.trim());
   if (!url) throw new Error('地址为空');
   const useCors = options.cors !== false;
   const timeoutMs = options.timeoutMs ?? 15000;
+
+  if (options.proxyOnly) {
+    if (!options.proxyTemplate) {
+      throw new Error('这类地址只能经代理取回，但代理模板是空的');
+    }
+    const proxied = applyProxy(options.proxyTemplate, url);
+    const element = await loadProxied(proxied, timeoutMs);
+    return { element, width: element.naturalWidth, height: element.naturalHeight, tainted: false, url: proxied };
+  }
 
   try {
     const element = await loadOnce(url, useCors, timeoutMs);

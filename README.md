@@ -113,6 +113,17 @@ pnpm preview
 > `VITE_API_BASE_URL` 是**构建期**变量（不是运行时读的），会被烧进产物并同时决定 CSP 里放行的后端来源；
 > 末尾斜杠会被自动去掉。Windows PowerShell 用 `$env:VITE_API_BASE_URL = "..."; pnpm build`。
 
+取图代理默认指向本项目自建的 EdgeOne Makers 端点 `https://api.jsumc.fun/imgproxy?url={url}`
+（实现在 `D:\Code\jsucraft\api` 的 `src/imgproxy.ts`）。要临时换成别的代理，用**构建期**变量
+`VITE_IMG_PROXY_TEMPLATE`（模板里用 `{url}` 占位，不给占位符就当成前缀拼接）：
+
+```bash
+VITE_IMG_PROXY_TEMPLATE='https://my-proxy.example.com/fetch?target={url}' pnpm build
+```
+
+`vite.config.ts` 读的是同一个变量，会自动把它的 origin 写进 CSP 的 `img-src` —— 两边不一致
+的表现是"生产构建里所有走代理的取图被 CSP 拦死，而 dev 永远复现不出来"。界面里没有改代理的设置项。
+
 ### 测试验证
 
 ```bash
