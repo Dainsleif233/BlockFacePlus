@@ -5,43 +5,52 @@
  */
 
 /**
- * 取图代理的默认模板：本项目自建的 EdgeOne Makers 端点。
+ * 取图代理的默认模板：**本站自己的**边缘函数，同源相对路径。
  *
- * 端点实现在 `D:\Code\jsucraft\api` 的 `src/imgproxy.ts`（`GET /imgproxy?url=`），
- * 只放行 Minecraft 皮肤源，并统一输出 `Access-Control-Allow-Origin: *` —— 那才是
- * 关键：代理存在的意义不是"能不能取到字节"，而是取回来的图能不能读像素。任何
- * 不发 CORS 头的第三方代理都会让画布被污染，导不出也提交不了。
+ * 端点是 `edge-functions/imgproxy.ts`（`GET /imgproxy?url=`），逻辑在
+ * `edge-functions/_lib/imgproxy-core.ts`，由本项目的 EdgeOne Makers 部署一起发出去。
  *
- * 为什么不再用 `images.weserv.nl`：那是第三方公共设施，并发/冷启动下会偶发
- * `Failed to fetch`（2026-10 实测 8 并发里 2 个失败，40 并发时 31/40 超过 8 秒），
- * 一旦失败就掉到第 3 级非 CORS 兜底 —— 图能看见、却再也提交不进房间。
+ * 为什么是相对路径而不是某个域名：同源图片按定义不会污染画布。取图代理的**全部意义**
+ * 就在于拿到可读像素——如果代理在另一个域上，它就必须额外回正确的 CORS 头，
+ * 那一环抖一下，用户拿到的就是一张"能看不能存"的头像。同源把这一环彻底去掉了：
+ * 少了 DNS/TLS 握手、少了 CORS 协商，也就不存在"代理答应了但头没发对"这种可能。
  *
- * 模板里的 `{url}` 会被替换成 encodeURIComponent 后的原始地址（见 applyProxy）。
+ * 这也让 CSP 变简单：`img-src 'self'` 本来就放行，不必为代理单列一行。
+ *
+ * 本地 `vite dev` / `vite preview` 由 vite 的中间件提供同一份逻辑（见 vite.config.ts 的
+ * imgProxy 插件），线上由边缘函数提供 —— 两边跑的是同一个 imgproxy-core。
+ *
+ * 注意它是**站点根**的绝对路径：项目部署在子路径下（`https://x/blockface/`）时，
+ * `/imgproxy` 会打到域名的根上。那种部署方式必须用 VITE_IMG_PROXY_TEMPLATE 指到实际位置。
  */
-export const SELF_HOSTED_PROXY_TEMPLATE = 'https://api.jsumc.fun/imgproxy?url={url}'
+export const SELF_HOSTED_PROXY_TEMPLATE = '/imgproxy?url={url}'
 
 /**
  * 实际使用的默认模板。
  *
- * 构建期可用 `VITE_IMG_PROXY_TEMPLATE` 换成别的地址（例如自建端点还没上线时的临时
- * 回退）。**必须与 CSP 保持一致**：`vite.config.ts` 用同一个变量算出 img-src 里要
- * 放行的 origin，两边读的是同一份环境值，所以别在运行期改这个常量。
+ * 构建期可用 `VITE_IMG_PROXY_TEMPLATE` 换成别的地址（例如把代理独立部署时的绝对 URL）。
+ * 换的时候注意两件事：
+ *  1. 换成绝对 URL 就变成跨域取图，对方**必须**回 `Access-Control-Allow-Origin`，
+ *     否则画布又被污染 —— 这正是本端点当初要解决的问题；
+ *  2. `vite.config.ts` 用同一个变量算出要放行的 CSP 来源，两边读的是同一份环境值。
  */
 export const DEFAULT_PROXY_TEMPLATE: string =
   ((import.meta.env.VITE_IMG_PROXY_TEMPLATE as string | undefined) ?? '').trim() ||
   SELF_HOSTED_PROXY_TEMPLATE
 
 /**
- * 把代理模板缩成一句能进提示文案的话（一般就是主机名）。
+ * 把代理模板缩成一句能进提示文案的话。
  *
- * 完整模板动辄七八十个字符，塞进「取图代理（...）不通」里会把整句话淹掉；
- * 用户真正需要认的也只有"是哪个站"。模板空着就让调用方看到"未配置"。
+ * 同源模板缩出来是"本站"，别的缩成主机名。完整模板动辄七八十个字符，塞进
+ * 「取图代理（...）不通」里会把整句话淹掉；用户真正需要认的也只是"是哪个站"。
  */
 export function describeProxyTemplate(template: string): string {
-  if (!template) return '未配置';
+  if (!template) return '未配置'
+  // 相对路径（同源）没有 host：那不是"未配置"，是本站自己
+  if (template.startsWith('/')) return '本站'
   try {
-    return new URL(template.replace('{url}', '')).host;
+    return new URL(template.replace('{url}', '')).host
   } catch {
-    return template;
+    return template
   }
 }

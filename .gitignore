@@ -16,6 +16,9 @@ dist-ssr
 # 设计初稿与验证截图：属于本地过程产物，不随源码入库
 design-demos/
 
+# edgeone CLI 的本地构建产物（边缘函数的打包结果），平台侧会自己重建
+.edgeone/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

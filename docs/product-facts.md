@@ -24,7 +24,7 @@ MUA（mualliance.ltd）联合认证皮肤走 `skin.mualliance.ltd/api/union/skin
 - 因此另外两级都已砍掉（2026-10 实测后决定）：
   - **第 1 级 CORS 直取**对这个站必然失败，只白等一次超时；
   - **第 3 级非 CORS 兜底**能出图，但画布被污染 → `toDataURL` 必抛 `SecurityError` → 这张头像永远提交不进房间。用户看到的是"图明明加载出来了却存不下来"，比"加载失败，请重试"难懂得多。**没有价值的能力不是能力，是陷阱。**
-- 代理用的是本项目自建的 EdgeOne Makers 端点（`https://api.jsumc.fun/imgproxy?url=`，实现在另一个仓库 `D:\Code\jsucraft\api` 的 `src/imgproxy.ts`），与「网络地址」入口共用同一个模板 `DEFAULT_PROXY_TEMPLATE`（`src/core/sources/proxyTemplate.ts`）；它统一输出 `Access-Control-Allow-Origin: *`，所以这一跳成功就意味着像素可读、画布不被污染。此前用的是第三方公共代理 `images.weserv.nl`；界面上一向没有、现在也没有改模板的入口，`VITE_IMG_PROXY_TEMPLATE` 只能在构建期换（且 `vite.config.ts` 用同一个变量算 img-src，两边必须一致）；代理不通时直接报错，不退化成能看不能存的图；
+- 代理用的是本项目自己的 EdgeOne Makers 边缘函数，模板是**同源相对路径** `/imgproxy?url={url}`（实现在 `edge-functions/imgproxy.ts`，逻辑在 `edge-functions/_lib/imgproxy-core.ts`；`vite dev`/`vite preview` 由 `vite.config.ts` 的中间件跑同一份逻辑）。同源图片按定义不可跨源，**连 CORS 头都不需要**，所以这一跳成功就意味着像素可读、画布不被污染 —— 这是把「代理答应了但头没发对」这类故障从设计上消掉，而不是靠配置正确。它和「网络地址」入口共用同一个模板 `DEFAULT_PROXY_TEMPLATE`（`src/core/sources/proxyTemplate.ts`）。此前用的是第三方公共代理 `images.weserv.nl`；界面上一向没有、现在也没有改模板的入口，`VITE_IMG_PROXY_TEMPLATE` 只能在构建期换（且 `vite.config.ts` 用同一个变量算 img-src，两边必须一致）；代理不通时直接报错，不退化成能看不能存的图；
 - 上游的错误码有语义差别：`404` 表示 Union 里没有这个角色名，`500` 表示该角色所属的成员皮肤站自己挂了（错误页里带具体原因），界面上都只说"没取到"，不臆断成"名字不存在"；
 - 「网络地址」入口仍然走完整的三级降级 —— `proxyOnly` 是 MUA 入口的选择，不是 `loadImage` 的默认行为。
 

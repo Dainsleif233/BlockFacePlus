@@ -1,5 +1,7 @@
 import vue from '@vitejs/plugin-vue'
-import { defineConfig, loadEnv, type Plugin } from 'vite'
+import { defineConfig, loadEnv, type Plugin, type PreviewServer, type ViteDevServer } from 'vite'
+// 显式写 .ts：本仓库走 nodenext 解析，扩展名不能省。这份 core 也被边缘函数与单测引用
+import { proxyImage, optionsResponse, methodNotAllowed } from './edge-functions/_lib/imgproxy-core.ts'
 
 /**
  * 后端是独立部署在 VPS 上的 FastAPI，前端产物留在边缘 Pages：
@@ -25,11 +27,11 @@ const buildEnv = (mode: string): Record<string, string> => ({
 })
 
 /** 只为 CSP 取个 origin；变量写错时让构建直接失败，避免产物与 CSP 不一致 */
-function apiOrigin(value: string): string {
+function cspOrigin(value: string, variable: string): string {
   try {
     return new URL(value).origin
   } catch {
-    throw new Error('[blockface+] VITE_API_BASE_URL 不是合法 URL：' + value)
+    throw new Error(`[blockface+] ${variable} 不是合法 URL：${value}`)
   }
 }
 
@@ -57,26 +59,31 @@ export default defineConfig(({ mode }) => {
    *  - data: / blob: 给内置皮肤内联图与本地导入的图片
    * style 需要 'unsafe-inline'：Vue 的 :style 绑定会落到行内 style 属性上。
    */
-  const apiCspOrigin = apiBase ? apiOrigin(apiBase) : ''
+  const apiCspOrigin = apiBase ? cspOrigin(apiBase, 'VITE_API_BASE_URL') : ''
 
   /**
-   * 取图代理模板的 CSP 来源。
+   * 取图代理模板，以及它要不要在 img-src 里单列。
    *
-   * 默认就是本项目自建的 EdgeOne Makers 端点（core/sources/proxyTemplate.ts 的
-   * SELF_HOSTED_PROXY_TEMPLATE）。这里用同一个环境变量算出要放行的 origin，
-   * **两端必须一致**：前端模板指向哪台主机，img-src 就得放行哪台主机 —— 少这一条，
-   * 生产构建里所有走代理的取图都会被 CSP 拦死，而 dev 不注入 CSP，本地永远复现不出来。
+   * 默认是**同源相对路径** `/imgproxy?url={url}`（edge-functions/imgproxy.ts，本项目自己的
+   * 边缘函数）。同源图片按定义不污染画布，CSP 里 'self' 本来就放行，所以默认情况下
+   * 这里不往 img-src 加任何东西 —— 少一条能配错的规则，就少一种"改了模板忘了改 CSP"。
+   *
+   * 只有显式用 VITE_IMG_PROXY_TEMPLATE 换成绝对 URL（把代理独立部署）时才需要放行它的
+   * origin，而且那块必须回 Access-Control-Allow-Origin，否则画布又被污染。
+   * dev 不注入 CSP，这类不一致本地永远复现不出来，只能靠这里两边读同一个变量来兜。
    */
-  const proxyTemplate = (env.VITE_IMG_PROXY_TEMPLATE ?? '').trim() || 'https://api.jsumc.fun/imgproxy?url={url}'
-  const proxyCspOrigin = apiOrigin(proxyTemplate.replace('{url}', ''))
+  const proxyTemplate = (env.VITE_IMG_PROXY_TEMPLATE ?? '').trim() || '/imgproxy?url={url}'
+  const proxyCspOrigin = proxyTemplate.startsWith('/')
+    ? ''
+    : ' ' + cspOrigin(proxyTemplate.replace('{url}', ''), 'VITE_IMG_PROXY_TEMPLATE')
   const CSP = [
     "default-src 'self'",
     "script-src 'self'",
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob: https://textures.minecraft.net https://mc-heads.net https://minotar.net" +
-      // 跨域取图的代理（MUA 入口的必经之路，也是其他入口的第 2 级兜底）。
-      // 自建端点，由 VITE_IMG_PROXY_TEMPLATE 决定，默认 api.jsumc.fun。
-      ' ' + proxyCspOrigin +
+      // 取图代理：仅当模板被换成绝对 URL 时才有内容（同源时 'self' 已经够了）。
+      // MUA 入口的必经之路，也是其他入口的第 2 级兜底。
+      proxyCspOrigin +
       // MUA 联合认证（skin.mualliance.ltd）：MUA 入口只走上面那级代理，不需要这一条；
       // 留着是为了「网络地址」入口粘贴 MUA 地址时的第 3 级非 CORS 兜底 —— 不写这一条，
       // 那条路径在代理不可用时就只剩"什么都没发生"。
@@ -87,6 +94,63 @@ export default defineConfig(({ mode }) => {
     "base-uri 'none'",
     "form-action 'self'",
   ].join('; ')
+
+  /**
+   * 本地把边缘函数挂到 vite 上（dev 与 preview 都挂）。
+   *
+   * 代理端点默认是**同源相对路径** `/imgproxy?url=`，线上它由 edge-functions/imgproxy.ts
+   * 提供。可是 `vite dev` 不认识 edge-functions/，光有相对路径本地只会拿到 index.html ——
+   * 于是本地跑 MUA 取图必然失败，而线上是好的，这类"只有本地坏"的坑最难查。
+   *
+   * 所以这里用**同一份** imgproxy-core 顶上一个中间件，dev/preview 的行为与线上逐字一致：
+   * 同一套白名单、同一条超时、同一个错误 JSON。三处各写一份必然走散。
+   *
+   * 唯一对不齐的是 OPTIONS：vite 自带的 CORS 中间件排在前面，预检请求会被它先答掉
+   * （它给的是 HMR 用的 `GET,HEAD,PUT,PATCH,POST,DELETE`），线上答的是 `GET, OPTIONS`。
+   * 这条端点永远不触发预检 —— 取图是简单 GET，不带自定义头 —— 所以这点差异碰不到真实请求；
+   * 真去把 vite 的 CORS 关掉或抢在它前面，代价比收益大。
+   */
+  function imgProxy(): Plugin {
+    const handle = async (
+      req: { url?: string; method?: string },
+      res: {
+        statusCode: number
+        setHeader(name: string, value: string): void
+        end(body?: unknown): void
+      },
+      next: () => void,
+    ): Promise<void> => {
+      // 只接管本站的 /imgproxy；其余请求（页面、HMR、/api 代理）原样放过
+      const raw = req.url ?? ''
+      if (!raw.split('?')[0].endsWith('/imgproxy')) {
+        next()
+        return
+      }
+
+      let response: Response
+      if (req.method === 'OPTIONS') response = optionsResponse()
+      else if (req.method !== 'GET' && req.method !== 'HEAD') response = methodNotAllowed(req.method ?? 'GET')
+      else {
+        const url = new URL(raw, 'http://localhost')
+        response = await proxyImage(url.searchParams.get('url'))
+      }
+
+      // 逐条写回，不用 res.writeHead：中间件之后 vite 还要复用这个 res
+      response.headers.forEach((value, name) => res.setHeader(name, value))
+      res.statusCode = response.status
+      res.end(Buffer.from(await response.arrayBuffer()))
+    }
+
+    return {
+      name: 'bf-imgproxy',
+      configureServer(server: ViteDevServer) {
+        server.middlewares.use((req, res, next) => void handle(req, res, next))
+      },
+      configurePreviewServer(server: PreviewServer) {
+        server.middlewares.use((req, res, next) => void handle(req, res, next))
+      },
+    }
+  }
 
   function securityHeaders(): Plugin {
     return {
@@ -106,7 +170,7 @@ export default defineConfig(({ mode }) => {
 
   return {
     base: './',
-    plugins: [vue(), securityHeaders()],
+    plugins: [vue(), imgProxy(), securityHeaders()],
     server: {
       proxy: {
         // 本地联调：前端跑 Vite（5173），后端跑本机 FastAPI（默认 8088），

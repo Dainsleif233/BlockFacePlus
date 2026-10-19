@@ -299,8 +299,10 @@ else check('正版账号 ID 入口可用', false, accDetail);
 // 7d MUA 联合认证 ID：skin.mualliance.ltd 不发 Access-Control-Allow-Origin，
 // 这条链路只有代理那一级（loadImage 的 proxyOnly）—— CORS 直取必然失败、非 CORS 兜底
 // 换来的是无法编码的污染画布，两级都已砍掉，代理不通就直接报错。
-// 代理是项目自建的 EdgeOne Makers 端点（core/sources/proxyTemplate.ts），它输出 ACAO，
-// 所以这一跳成功就意味着像素可读、画布不被污染。
+// 代理是项目自建的 EdgeOne Makers 端点 /imgproxy（core/sources/proxyTemplate.ts），与前端**同源**；
+// 同源图片按定义不可跨源，连 ACAO 都不需要 —— 所以这一跳成功就意味着像素可读、画布不被污染。
+// 本机跑 e2e 时这个端点由 vite 的中间件提供（vite.config.ts 的 imgProxy 插件，跑的是同一份
+// edge-functions/_lib/imgproxy-core.ts），所以 e2e 能覆盖到线上那条路径的逻辑。
 // 这里**不走 useMuaSkin**：那个入口会把皮肤套到选中的头像上，而这一节后面还有逐像素对拍，
 // 只验"地址拼对了 + 取图管线通不通"，不碰 skins / layers / 撤销栈。
 const muaUrl = store.muaSkinUrl('UpSGE');
@@ -314,7 +316,9 @@ try {
   // proxyOnly 与真实入口一致：代理不通就抛错，绝不退化成能看不能存的图
   const loaded = await withTimeout(
     loadImage(muaUrl, { proxyTemplate: editor.proxyTemplate, proxyOnly: true }), 20000, 'MUA 联合认证');
-  muaOk = loaded.width === 64 && loaded.height === 64 && loaded.tainted === false;
+  // url 必须是本站 /imgproxy 那一跳：直连 MUA 得到的像素是污染画布，压根编不了码
+  const viaProxy = loaded.url.startsWith('/imgproxy') || loaded.url.startsWith(location.origin + '/imgproxy');
+  muaOk = loaded.width === 64 && loaded.height === 64 && loaded.tainted === false && viaProxy;
   muaDetail = loaded.width + '×' + loaded.height + (loaded.tainted ? ' / 竟然退了非 CORS 兜底（画布会污染）' : ' / 未污染') +
     ' / ' + loaded.url.slice(0, 60);
 } catch (e) { muaDetail = String(e && e.message ? e.message : e); }

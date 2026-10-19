@@ -73,10 +73,12 @@ export function withRetryMarker(url: string): string {
 /**
  * 走代理加载，失败再给一次机会。
  *
- * 为什么要重试：代理是第三方公共设施，冷启动和并发场景下 `Failed to fetch` 不是个例
- * （实测 8 个并发请求里有 2 个这样失败，串行则基本不失败）。
+ * 为什么要重试：代理是网络上的另一跳，冷启动和并发场景下超时/`Failed to fetch` 不是个例
+ * （第三方公共代理实测 8 个并发里有 2~4 个这样失败，串行则基本不失败；自建同源端点把
+ * 失败率压到 20 并发 0 失败，但它仍可能被上游拖慢）。
  * 不重试的代价很具体 —— 第 2 级失败会掉到第 3 级非 CORS 兜底，图能显示、
  * 但画布被污染，于是这张皮肤再也导不出来、也提交不进房间。
+ * 传了 `proxyOnly` 的来源（MUA）没有第 3 级可掉，那里重试意味着直接报错。
  */
 async function loadProxied(proxyUrl: string, timeoutMs: number): Promise<HTMLImageElement> {
   try {

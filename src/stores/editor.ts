@@ -778,8 +778,10 @@ export async function useAccountSkin(name: string): Promise<void> {
  *  - 第 3 级非 CORS 兜底能出图，但画布被污染 → toDataURL 必抛 SecurityError →
  *    这张头像永远提交不进房间。用户看到的是"图明明加载出来了却存不下来",
  *    比"加载失败，请重试"难懂得多。没有价值的能力不是能力，是陷阱。
- * 代理用的是本项目自建的 EdgeOne Makers 端点（core/sources/proxyTemplate.ts），与
- * 「网络地址」入口同一套模板，只是不再有降级台阶可以掉。
+ * 代理用的是本项目自建的 EdgeOne Makers 边缘函数 `/imgproxy?url={url}`，与前端**同源**
+ * （见 edge-functions/imgproxy.ts 与 core/sources/proxyTemplate.ts）。同源图片按定义不可跨源，
+ * 连 CORS 头都不依赖 —— 此前用第三方公共代理时，"代理答应了但头没发对"正是那个偶发故障的来源。
+ * 它和「网络地址」入口共用同一套模板，只是这条路不再有降级台阶可以掉。
  */
 export function muaSkinUrl(name: string): string {
   return 'https://skin.mualliance.ltd/api/union/skin/byname/' + encodeURIComponent(name);

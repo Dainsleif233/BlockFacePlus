@@ -420,8 +420,12 @@ pnpm build
 `pnpm build` 的产物在 `dist/`（`index.html`、`assets/`、`favicon.svg`）。边缘 Pages 的发布都是同一件事：
 **把 `dist/` 整个目录当成站点根传上去**。
 
-- 本项目是纯静态 SPA，没有服务端渲染、没有平台专属函数，所以 Cloudflare Pages、Netlify 或任何静态托管都适用；
-- 在平台控制台的「构建配置」里填构建命令 `pnpm build`、输出目录 `dist`；也可以本地构建好再上传目录；
+- 前端本身是纯静态 SPA，没有服务端渲染；但它**带一个边缘函数**（`edge-functions/imgproxy.ts`，取图代理），所以除了 EdgeOne Makers，别的静态托管还得自己解决这一个端点（见 6.3）；
+- EdgeOne Makers 上：这些参数写在仓库根的 `edgeone.json`（`buildCommand` / `installCommand` / `outputDirectory`）里，
+  平台按它构建；`edge-functions/` 由平台自动打包（目录名就是路由前缀，`_` 开头的目录不当路由，所以 `_lib/` 不会被暴露）——
+  **手工上传 `dist/` 时要把 `edge-functions/` 和 `package.json` 一并放进去**，否则线上没有代理；
+- 本地改完代理逻辑，用 `pnpm dev`（或 `pnpm preview`）就能验：`vite.config.ts` 的 `imgProxy` 插件把**同一份** `_lib/imgproxy-core.ts` 挂成了中间件，
+  白名单、超时、错误 JSON 与线上逐字一致。唯一对不齐的是 `OPTIONS`（vite 自带的 CORS 中间件排在前面先答掉了），而取图是简单 GET、不触发预检，碰不到；
 - 路由上只有 `?room=xxx` 这种查询串，没有 history 路由，因此**不需要** SPA 回退规则；
   如果平台强制要求填一条 rewrite，就填 `/* → /index.html`；
 - `vite.config.ts` 里 `base: './'` 让资源用相对路径引用，所以放在子路径下也能正常加载。
@@ -434,9 +438,13 @@ pnpm build
   其中 `connect-src` 需要包含后端 origin —— `vite.config.ts` 会从 `VITE_API_BASE_URL` 自动提取并加上，
   所以**改了后端地址一定要重新构建**，否则产物里的 CSP 还停在旧域名上。
   被 CSP 拦下的表现是控制台明确写出 `Content Security Policy` 字样，和 CORS 报错长得不一样，别混。
-- **取图代理也在 CSP 里**：`img-src` 放行的是取图代理的 origin（默认自建端点 `https://api.jsumc.fun/imgproxy?url={url}`，
-  由 `VITE_IMG_PROXY_TEMPLATE` 在构建期决定）。它和 `connect-src` 是两条独立的规则，别只记得后端那一条：
-  代理被拦下的表现是**头像全都取不回来**（`new Image()` 被 CSP 拒绝），而不是房间进不去。
+- **取图代理默认同源，CSP 不用管它**：默认模板是相对路径 `/imgproxy?url={url}`，`img-src` 里的 `'self'`
+  本来就放行。只有用 `VITE_IMG_PROXY_TEMPLATE` 把它换成**绝对地址**时才需要放行那个 origin ——
+  `vite.config.ts` 会从同一个变量自动加上，所以换了地址一定要重新 `build`。
+  被 CSP 拦下的表现是**头像全都取不回来**（`new Image()` 被拒绝），而不是房间进不去。
+- **代理这个端点必须存在**：前端取出 MUA 皮肤只走 `/imgproxy` 这一级（`skin.mualliance.ltd` 不发跨域头）。
+  把 `dist/` 传到不带边缘函数的静态托管上，MUA 入口会直接报"没取到"，不会退化成能看不能存的图。
+  本地少这一环的验证方式是 `pnpm preview`：`vite.config.ts` 用一个中间件跑**同一份** `imgproxy-core`。
 - **preflight 是省不掉的**：密码走自定义请求头 `X-BF-Room-Pwd`，跨域时浏览器一定会先发一次 `OPTIONS`。
   不要去反向代理上给 `OPTIONS` 加长时间缓存 —— 这里没有值得省的东西。
 - **别把密码塞进 URL**：契约规定密码只走请求头，既是为了不进反向代理的 access_log，也是为了不留在浏览器历史里。

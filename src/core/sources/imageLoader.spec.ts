@@ -103,7 +103,9 @@ function stubImages(respond: (url: string, cors: boolean) => 'ok' | 'fail') {
 }
 
 const MUA_URL = 'https://skin.mualliance.ltd/api/union/skin/byname/UpSGE';
-const PROXY = 'https://api.jsumc.fun/imgproxy?url={url}';
+// 用真实默认模板（同源相对路径）而不是编一个域名：拼址逻辑对相对路径同样成立，
+// 而这里一旦换成绝对地址，测试就再也发现不了「默认模板变成跨域」这种回归
+const PROXY = '/imgproxy?url={url}';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -114,7 +116,7 @@ describe('loadImage 的 proxyOnly（MUA 入口用它）', () => {
     const attempts = stubImages(() => 'ok');
     const loaded = await loadImage(MUA_URL, { proxyTemplate: PROXY, proxyOnly: true });
     expect(attempts).toEqual([
-      { url: 'https://api.jsumc.fun/imgproxy?url=' + encodeURIComponent(MUA_URL), cors: true },
+      { url: '/imgproxy?url=' + encodeURIComponent(MUA_URL), cors: true },
     ]);
     expect(loaded.tainted).toBe(false);
     expect(loaded.width).toBe(64);
@@ -125,7 +127,9 @@ describe('loadImage 的 proxyOnly（MUA 入口用它）', () => {
     await expect(loadImage(MUA_URL, { proxyTemplate: PROXY, proxyOnly: true })).rejects.toThrow();
     // 代理自己重试过一次（第二次换了缓存键），但始终没碰过上游地址
     expect(attempts).toHaveLength(2);
-    expect(attempts.every((a) => a.url.startsWith('https://api.jsumc.fun/imgproxy'))).toBe(true);
+    expect(attempts.every((a) => a.url.startsWith('/imgproxy'))).toBe(true);
+    // 始终带上 crossOrigin：走代理图的就是可读像素，掉回非 CORS 就白代理了
+    expect(attempts.every((a) => a.cors)).toBe(true);
     expect(attempts[1].url).toContain('_bfretry=');
   });
 
