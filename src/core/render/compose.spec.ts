@@ -5,6 +5,8 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import type { AvatarLayer } from '../model/types';
+import type { SkinTexture } from '../skin/texture';
 import {
   clampRenderScale,
   composeDocument,
@@ -12,6 +14,7 @@ import {
   MAX_CANVAS_EDGE,
   MAX_CANVAS_PIXELS,
 } from './compose';
+import type { HeadCache } from './headCache';
 
 function createMockCanvas(width = 0, height = 0) {
   const ctx = {
@@ -112,5 +115,58 @@ describe('renderBackground 与动静分离缓存', () => {
     expect(docCanvas.width).toBe(100);
     expect(docCanvas.height).toBe(100);
     expect(docCtx.drawImage).toHaveBeenCalledWith(bgCanvas, 0, 0);
+  });
+});
+
+describe('composeDocument 头像贴合', () => {
+  // 离屏头像：开着帽层时画布大于正脸（外扩），关着时等于正脸。
+  // composeDocument 按 head.width 与正脸比例居中贴合，正脸精确对齐 layer.size，帽沿溢出包围盒。
+  const skin = { meta: { isCustomImage: false } } as SkinTexture;
+  const baseLayer = {
+    visible: true,
+    x: 0,
+    y: 0,
+    size: 200,
+    rotation: 0,
+    opacity: 1,
+    flipH: false,
+    overlay: false,
+  } as AvatarLayer;
+
+  function composeHead(layer: AvatarLayer, scale = 1) {
+    const { canvas, ctx } = createMockCanvas();
+    const cache = {
+      get: vi.fn((_skin: unknown, overlay: boolean, size: number) => {
+        // Mock 采用 1.25 倍整除比例，验证外扩画布贴合居中几何
+        const width = overlay ? Math.round(size * 1.25) : size;
+        return { width, height: width };
+      }),
+    } as unknown as HeadCache;
+    const head = cache.get(skin, layer.overlay, Math.round(layer.size * scale));
+    composeDocument(canvas, { width: 600, height: 600, scale, items: [{ layer, skin }], cache });
+    return { ctx, cache, head };
+  }
+
+  it('无帽层：离屏画布 = 正脸，直接按包围盒居中贴合', () => {
+    const layer = { ...baseLayer, overlay: false } as AvatarLayer;
+    const { ctx, head } = composeHead(layer);
+    expect(ctx.drawImage).toHaveBeenCalledWith(head, -100, -100, 200, 200);
+  });
+
+  it('开帽层：按 head.width 比例缩放，外扩后仍以正脸中心贴合包围盒', () => {
+    const layer = { ...baseLayer, overlay: true } as AvatarLayer;
+    const { ctx, cache, head } = composeHead(layer);
+    // head.width = 250（正脸 200，外扩至 250）→ 贴合矩形 = (-125,-125,250,250)
+    expect(head.width).toBe(250);
+    expect(cache.get).toHaveBeenCalledWith(skin, true, 200);
+    expect(ctx.drawImage).toHaveBeenCalledWith(head, -125, -125, 250, 250);
+  });
+
+  it('开帽层 + 二倍导出：按输出设备像素取离屏头像，按正脸比例缩放保持文档贴合尺寸不变', () => {
+    const layer = { ...baseLayer, overlay: true } as AvatarLayer;
+    const { ctx, cache, head } = composeHead(layer, 2);
+    expect(cache.get).toHaveBeenCalledWith(skin, true, 400);
+    expect(head.width).toBe(500);
+    expect(ctx.drawImage).toHaveBeenCalledWith(head, -125, -125, 250, 250);
   });
 });

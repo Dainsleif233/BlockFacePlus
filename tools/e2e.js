@@ -27,6 +27,22 @@ const countDiff = (a, b) => {
   return { pixels: n, maxChannel: max };
 };
 
+// 开着帽层时离屏画布外扩一圈（边长 = pixelSize + 2×帽沿；帽子层正脸整体按 ≈9/8 放大铺满画布，
+// 对应游戏内帽盒 9×9 对脸 8×8）。底层正脸仍铺满 pixelSize×pixelSize，只是整体平移了帽沿宽。
+// 拿它和「同尺寸无帽画布 / crafatar 的等大参考图」对拍前，先把正脸区域裁出来，
+// 这样下面所有逐像素断言的坐标含义与旧版（等大）完全一致。
+const cropFace = (canvas, pixelSize) => {
+  const rim = (canvas.width - pixelSize) / 2;
+  if (rim <= 0) return canvas;
+  const out = document.createElement('canvas');
+  out.width = pixelSize;
+  out.height = pixelSize;
+  const c = out.getContext('2d');
+  c.imageSmoothingEnabled = false;
+  c.drawImage(canvas, rim, rim, pixelSize, pixelSize, 0, 0, pixelSize, pixelSize);
+  return out;
+};
+
 await sleep(600);
 const store = window.__blockface;
 if (!store) return { fatal: 'window.__blockface 未挂载（是否在 dev 模式？）' };
@@ -91,6 +107,10 @@ const head64 = (skin, overlay) => renderHeadCanvasRef(skin, { overlay, pixelSize
 const headPixel = (canvas, x, y) => Array.from(canvas.getContext('2d').getImageData(x, y, 1, 1).data);
 const noHat = head64(steve, false);
 const withHat = head64(steve, true);
+// 无帽层画布 = 正脸本身；开帽层后正脸整体平移一个帽沿宽（64 → 4×2 帽沿 = 72）
+const hatRim = (withHat.width - 64) / 2;
+check('帽层比脸大一圈（64→' + withHat.width + '，帽沿 4px/边）', withHat.width === 72 && withHat.height === 72 && noHat.width === 64,
+  'noHat=' + noHat.width + ' withHat=' + withHat.width);
 let uvBad = 0;
 let blendBad = 0;
 let blendMax = 0;
@@ -101,7 +121,7 @@ for (let y = 0; y < 8; y += 1) {
     if (got[0] !== base[0] || got[1] !== base[1] || got[2] !== base[2]) uvBad += 1;
     const hat = skinAt(40 + x, 8 + y);
     const alpha = hat[3] / 255;
-    const blended = headPixel(withHat, x * 8 + 4, y * 8 + 4);
+    const blended = headPixel(withHat, hatRim + x * 8 + 4, hatRim + y * 8 + 4);
     for (let k = 0; k < 3; k += 1) {
       const diff = Math.abs(Math.round(hat[k] * alpha + base[k] * (1 - alpha)) - blended[k]);
       if (diff > blendMax) blendMax = diff;
@@ -146,11 +166,45 @@ check('拖右下角手柄放大图层', layer.size > sizeBefore + 40, sizeBefore
 // Steve 的第二层正面是一圈不透明灰（平铺直出会盖住额头两行与两鬓），Alex 的正面是全透明。
 const alex = store.getSkin('builtin-alex');
 const head128 = (skin, overlay) => renderHeadCanvasRef(skin, { overlay, pixelSize: 128 });
-const steveHat = countDiff(head128(steve, true), head128(steve, false));
-const alexHat = countDiff(head128(alex, true), head128(alex, false));
+// 裁出正脸再比：外扩环带（8px/边）不参与「脸被盖住多少」的基线统计。
+// 正脸区域里的帽层是按 9/8 放大的，因此该基线与旧 1:1 版本的 5632 刻意不同。
+const steveHat = countDiff(cropFace(head128(steve, true), 128), head128(steve, false));
+const alexHat = countDiff(cropFace(head128(alex, true), 128), head128(alex, false));
 // 两个内置皮肤的数据事实刚好相反，都记下来：Steve 的第二层是灰头盔，Alex 的第二层是空的。
-check('Steve 的帽子层盖住约三分之一（官方灰头盔）', steveHat.pixels === 5632, '差异像素=' + steveHat.pixels + '/16384');
+check('Steve 的帽子层盖住约三分之一（官方灰头盔）', steveHat.pixels === 4952, '差异像素=' + steveHat.pixels + '/16384');
 check('Alex 的帽子层正面全透明', alexHat.pixels === 0, '差异像素=' + alexHat.pixels);
+// 外扩环带：128 → 144（帽层 9/8 放大 + 正脸 1:1 居中）；Alex 的第二层全透明，环带也全透明
+check('帽层画布外扩（128→144，外圈 8px/边）', head128(alex, true).width === 144 && head128(steve, true).width === 144,
+  'Alex=' + head128(alex, true).width + ' Steve=' + head128(steve, true).width);
+
+// 自造皮肤核对「整层放大」几何：底层全红、帽层只有 texel(7,7) 一个不透明绿像素。
+// 帽层整体放大 9/8 铺满 72×72 画布后，texel(7,7) 必须恰好落在右下 [63,72)² ——整整 81 个像素。
+// 曾有一版把外圈画成「边缘行/列拉伸出来的细环带」，就是这教训的回归断言。
+const geoSheet = document.createElement('canvas');
+geoSheet.width = 64; geoSheet.height = 64;
+const geoCtx = geoSheet.getContext('2d');
+geoCtx.fillStyle = '#ff0000';
+geoCtx.fillRect(8, 8, 8, 8);      // 底层正脸
+geoCtx.fillStyle = '#00ff00';
+geoCtx.fillRect(47, 15, 1, 1);    // 帽层 texel (7,7)：唯一的不透明帽层像素
+const geoSkin = { id: 'geo-shell', image: geoSheet, meta: { width: 64, height: 64, scale: 1, isCustomImage: false, frontOnly: false } };
+const geoHead = renderHeadCanvasRef(geoSkin, { overlay: true, pixelSize: 64 });
+const geoData = geoHead.getContext('2d').getImageData(0, 0, geoHead.width, geoHead.height).data;
+let geoGreen = 0, gx0 = 999, gy0 = 999, gx1 = -1, gy1 = -1;
+for (let y = 0; y < geoHead.height; y += 1) {
+  for (let x = 0; x < geoHead.width; x += 1) {
+    const i = (y * geoHead.width + x) * 4;
+    if (geoData[i] === 0 && geoData[i + 1] === 255 && geoData[i + 2] === 0) {
+      geoGreen += 1;
+      gx0 = Math.min(gx0, x); gy0 = Math.min(gy0, y); gx1 = Math.max(gx1, x); gy1 = Math.max(gy1, y);
+    }
+  }
+}
+check('帽子层整层放大：texel(7,7) 撑到画布右下 9×9（72 = 64 脸 + 4×2 外圈）',
+  geoGreen === 81 && gx0 === 63 && gy0 === 63 && gx1 === 71 && gy1 === 71,
+  'green=' + geoGreen + ' bbox=[' + gx0 + ',' + gy0 + ']-[' + gx1 + ',' + gy1 + ']');
+const geoNoHat = renderHeadCanvasRef(geoSkin, { overlay: false, pixelSize: 64 });
+check('帽子层关闭时外圈消失，画布回正脸尺寸', geoNoHat.width === 64 && geoNoHat.height === 64, geoNoHat.width + '×' + geoNoHat.height);
 
 // 端到端：开关真的改变画布上额头那一格的颜色
 store.updateLayer(layer.id, { overlay: true });
@@ -357,24 +411,24 @@ const fetchAvatar = async (withOverlay) => {
 };
 
 try {
-  for (const withOverlay of [true, false]) {
-    const refCanvas = await fetchAvatar(withOverlay);
-    const ours = renderHeadCanvasRef(steve, { overlay: withOverlay, pixelSize: 128 });
-    const diff = countDiff(refCanvas, ours);
-    const total = 128 * 128;
-    check(
-      '与 crafatar 独立实现逐像素一致（' + (withOverlay ? '含帽子层' : '不含帽子层') + '）',
-      diff.pixels === 0,
-      '差异像素=' + diff.pixels + '/' + total + ' 最大通道差=' + diff.maxChannel,
-    );
-  }
+  // crafatar 的 /avatars 帽层按 1:1（等大）合成，而本实现在 9/8 上刻意不同——
+  // 含帽层的变体不可能逐像素相等，只在「不含帽子层」变体对拍；放大几何由自造皮肤用例核对。
+  const refCanvas = await fetchAvatar(false);
+  const ours = renderHeadCanvasRef(steve, { overlay: false, pixelSize: 128 });
+  const diff = countDiff(refCanvas, ours);
+  const total = 128 * 128;
+  check(
+    '与 crafatar 独立实现逐像素一致（不含帽子层）',
+    diff.pixels === 0,
+    '差异像素=' + diff.pixels + '/' + total + ' 最大通道差=' + diff.maxChannel,
+  );
 } catch (e) {
   // 参考图在别人服务器上，拿不到就是没验，不该报成"我们的渲染坏了"。
   // 报 FAIL 会让网络一抖就红一片；报 SKIP 并把原因写清楚，跳过数就是这次没覆盖到的部分。
   const message = String(e && e.message ? e.message : e);
   const compared = results.filter((r) => r.name.indexOf('与 crafatar 独立实现逐像素一致') === 0 && r.pass).length;
   if (looksLikeNetwork(message)) {
-    skip('与 crafatar 独立实现交叉验证', '这次没和外部实现对拍（已成功 ' + compared + '/2 种变体）：' + message);
+    skip('与 crafatar 独立实现交叉验证', '这次没和外部实现对拍（已成功 ' + compared + '/1 种变体）：' + message);
   } else {
     check('与 crafatar 独立实现交叉验证', false, '未能取得参考图：' + message);
   }
@@ -544,11 +598,14 @@ composeDocument(solo, {
 });
 const rel = 0.3125;
 const soloHead = renderHeadCanvasRef(soloSkin, { overlay: soloLayer.overlay, pixelSize: Math.round(soloLayer.size) });
+// 开帽层时离屏画布四周多一圈帽沿，取样坐标 = 帽沿 + 正脸内相对位置（与 cropFace 同款语义）
+const soloFace = Math.round(soloLayer.size);
+const soloRim = (soloHead.width - soloFace) / 2;
 const soloPixel = Array.from(solo.getContext('2d').getImageData(
   Math.round(soloLayer.x - soloLayer.size / 2 + soloLayer.size * rel),
   Math.round(soloLayer.y - soloLayer.size / 2 + soloLayer.size * rel), 1, 1).data);
 const soloHeadPixel = Array.from(soloHead.getContext('2d').getImageData(
-  Math.round(soloHead.width * rel), Math.round(soloHead.height * rel), 1, 1).data);
+  Math.round(soloRim + soloFace * rel), Math.round(soloRim + soloFace * rel), 1, 1).data);
 check('导出画布的像素 = 离屏头像同点像素（颜色没被底纹混掉）',
   soloPixel[3] === 255 && soloPixel[0] === soloHeadPixel[0] && soloPixel[1] === soloHeadPixel[1] && soloPixel[2] === soloHeadPixel[2],
   '导出=' + JSON.stringify(soloPixel) + ' 离屏=' + JSON.stringify(soloHeadPixel));
@@ -584,7 +641,10 @@ const relPos = 0.3125; // 正脸第 10 列的中心，离像素边界远，取�
 const headAt = (item) => renderHeadCanvasRef(store.getSkin(item.skinId), { overlay: item.overlay, pixelSize: Math.round(item.size * scaleDoc * dprDoc) });
 const headPixelOf = (item) => {
   const head = headAt(item);
-  return Array.from(head.getContext('2d').getImageData(Math.round(head.width * relPos), Math.round(head.height * relPos), 1, 1).data);
+  // 离屏画布 = 正脸 + 四周帽沿，取样点从帽沿往里数（正脸按 item.size 平移到位）
+  const face = Math.round(item.size * scaleDoc * dprDoc);
+  const rim = (head.width - face) / 2;
+  return Array.from(head.getContext('2d').getImageData(Math.round(rim + face * relPos), Math.round(rim + face * relPos), 1, 1).data);
 };
 const docPixelOf = (item) => Array.from(document.querySelector('.artboard__doc').getContext('2d').getImageData(
   Math.round((item.x - item.size / 2 + item.size * relPos) * scaleDoc * dprDoc),

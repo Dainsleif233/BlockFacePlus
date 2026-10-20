@@ -42,7 +42,10 @@ function draw(): void {
     ctx.translate(pixels, 0);
     ctx.scale(-1, 1);
   }
-  ctx.drawImage(head, 0, 0);
+  // 开帽层时离屏画布比正脸大一圈（帽沿），整图等比缩放进方形缩略图：
+  // 帽沿贴到边框、正脸略缩，四周边距对称；像素皮肤关平滑保住边缘。
+  ctx.imageSmoothingEnabled = Boolean(currentSkin.meta.isCustomImage);
+  ctx.drawImage(head, 0, 0, pixels, pixels);
   ctx.setTransform(1, 0, 0, 1, 0, 0);
 }
 

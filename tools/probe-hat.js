@@ -30,7 +30,9 @@ for (const id of ['builtin-steve', 'builtin-alex']) {
   const headNoHat = renderHeadCanvas(skin, { overlay: false, pixelSize: 64 });
   const headHat = renderHeadCanvas(skin, { overlay: true, pixelSize: 64 });
   const noHat = headNoHat.getContext('2d').getImageData(0, 0, 64, 64).data;
-  const hat = headHat.getContext('2d').getImageData(0, 0, 64, 64).data;
+  // 开帽层后画布带帽沿（64 → 4×2 = 72），正脸整体平移帽沿宽，取样按画布真实宽度重算偏移
+  const rim = (headHat.width - 64) / 2;
+  const hat = headHat.getContext('2d').getImageData(0, 0, headHat.width, headHat.width).data;
   let faceMismatch = 0;
   let compositeMaxDiff = 0;
   let compositeMismatch = 0;
@@ -41,11 +43,12 @@ for (const id of ['builtin-steve', 'builtin-alex']) {
       const fi = ((fy * w) + fx) * 4;
       const hi = ((hy * w) + hx) * 4;
       const oi = (((y * 8) + 4) * 64 + (x * 8) + 4) * 4;
+      const oih = ((((y * 8) + 4 + rim) * headHat.width) + (x * 8) + 4 + rim) * 4;
       if (noHat[oi] !== d[fi] || noHat[oi + 1] !== d[fi + 1] || noHat[oi + 2] !== d[fi + 2]) faceMismatch += 1;
       const a = d[hi + 3] / 255;
       for (let k = 0; k < 3; k += 1) {
         const expect = Math.round(d[hi + k] * a + d[fi + k] * (1 - a));
-        const diff = Math.abs(expect - hat[oi + k]);
+        const diff = Math.abs(expect - hat[oih + k]);
         if (diff > compositeMaxDiff) compositeMaxDiff = diff;
         if (diff > 1) compositeMismatch += 1;
       }

@@ -228,6 +228,8 @@ export function composeDocument(canvas: HTMLCanvasElement, options: ComposeOptio
 
     const devicePixels = Math.min(MAX_HEAD_PIXELS, Math.max(1, Math.round(layer.size * scale)));
     const head = cache.get(skin, layer.overlay, devicePixels);
+    // 开帽层时离屏画布比正脸大一圈（帽沿溢出包围盒），按正脸比例缩放后居中贴合
+    const drawSize = layer.size * (head.width / devicePixels);
 
     ctx.save();
     ctx.globalAlpha = Math.min(1, Math.max(0, layer.opacity));
@@ -236,7 +238,7 @@ export function composeDocument(canvas: HTMLCanvasElement, options: ComposeOptio
     if (layer.flipH) ctx.scale(-1, 1);
     const isRotated = layer.rotation % 90 !== 0;
     ctx.imageSmoothingEnabled = skin.meta.isCustomImage || isRotated || devicePixels < layer.size * scale - 0.5;
-    ctx.drawImage(head, -layer.size / 2, -layer.size / 2, layer.size, layer.size);
+    ctx.drawImage(head, -drawSize / 2, -drawSize / 2, drawSize, drawSize);
     ctx.restore();
   }
   ctx.restore();
